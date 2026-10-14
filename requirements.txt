@@ -1,0 +1,30 @@
+# 运行时依赖（帽兜工具 / ArchiveTool）
+# 安装: pip install -r requirements.txt
+
+# ── GUI 框架 ──
+PyQt6>=6.5.0
+PyQt6-WebEngine>=6.5.0          # 网页爬虫页的内嵌浏览器 (QWebEngineView)
+
+# ── 压缩格式 ──
+py7zr>=0.20.0                    # 7z
+pyzipper>=0.3.6                  # ZIP AES 加密
+pycryptodome>=3.20.0             # .zhans / .shishan 的 AES-256-GCM
+
+# ── 网络 ──
+requests>=2.28.0                 # 爬虫引擎 / HTTP 请求页 / AI 客户端
+psutil>=5.9.0                    # 局域网网卡枚举（缺失时退化为仅主网卡）
+
+# ── 爬虫解析 ──
+lxml>=4.9.0
+cssselect>=1.2.0
+beautifulsoup4>=4.12.0
+
+# ── 数据导出 ──
+openpyxl>=3.1.0                  # 爬虫结果导出 .xlsx
+
+# ── 打包 ──
+pyinstaller>=6.0.0
+Pillow>=10.0.0                   # code/build.py 生成 .ico / .png 图标
+
+# ── 可选（缺失时对应功能显示提示而非崩溃）──
+# pyaudio>=0.2.13                # 局域网语音通话
