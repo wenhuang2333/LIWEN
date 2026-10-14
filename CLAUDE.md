@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Before starting to write code, organize your thoughts and explain how you plan to implement it.
 ## Project overview
 
-A PyQt6-based Windows desktop app for file compression/decompression (ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, SHISHAN, ZHANS), LAN file transfer, LAN room-based multiplayer VPN tunneling with voice chat, and visual web crawler with embedded Chromium browser. Built with a dark Catppuccin Mocha-inspired theme, packaged into a standalone .exe via PyInstaller. Window title is "帽兜工具".
+A PyQt6-based Windows desktop app for file compression/decompression (ZIP, 7z, TAR, TAR.GZ, TAR.BZ2, TAR.XZ, SHISHAN, ZHANS), LAN file transfer, LAN room-based multiplayer VPN tunneling with voice chat, and visual web crawler with embedded Chromium browser. Built with a dark Catppuccin Mocha-inspired theme, packaged into a standalone .exe via PyInstaller. Chinese name "帽兜工具" (window title); English name **LIWEN Tool** (repo, docs, releases). Filesystem/build identifiers use the space-free slug **`LIWENTool`** — see the naming rules below.
 
 ## Directory layout
 
@@ -55,8 +55,8 @@ python code/main.py decompress out.zip -d ./out
 python code/main.py settings-list
 
 # Build standalone packages
-python code/build.py app         # onedir build (output: dist/ArchiveTool/)
-python code/build.py repair      # onedir build of repair tool (output: dist/ArchiveTool_Repair/)
+python code/build.py app         # onedir build (output: dist/LIWENTool/)
+python code/build.py repair      # onedir build of repair tool (output: dist/LIWENTool_Repair/)
 python code/build.py installer   # package app + repair into setup.exe  (Windows only)
 python code/build.py dmg         # macOS .dmg
 python code/build.py tarball     # Linux portable .tar.gz
@@ -97,7 +97,7 @@ Paths below are relative to `code/` unless stated otherwise.
   - **RoomPage** (`ui/room_page.py`): Simple in-room view — no VPN/virtual adapter. Displays room info, online peers, voice controls over real LAN IP addresses. Used when VPN module is unavailable.
   - **VpnPage** (`ui/vpn_page.py`): Full VPN tunneling page (virtual IP on 10.99.0.0/16 subnet, optional signaling server mode). Depends on optional Rust `lan_vpn.pyd` + `wintun.dll`. Falls back to install-guide message if unavailable. Polls Rust core at 200ms (5 Hz) for peer list + traffic stats. Supports UAC elevation via `_request_admin_relaunch()`. Has a 1.5s stop cooldown to let Windows tear down the TUN adapter.
 - `my_page.py` — `MyPage`: settings/profile page with username, theme/accent color, default receive path, default password, auto-accept toggle. Auto-saves on every field change via `settings.set()` + `settings.save()`.
-- `about_page.py` — `AboutPage`: displays app name, version, author, and description. Also exports `APP_NAME`, `APP_VERSION`, `APP_AUTHOR`, `APP_EMAIL`, `APP_DESCRIPTION`.
+- `about_page.py` — `AboutPage`: displays app name (Chinese + English), version, author, and description. Re-exports `APP_NAME` (中文名), `APP_NAME_EN`, `APP_VERSION`, `APP_AUTHOR`, `APP_EMAIL` from `utils/constants.py`, plus its own `APP_DESCRIPTION`. **Change the version in `utils/constants.py`, not here.**
 - `styles.py` — `get_main_style(accent)` function that generates the full QSS stylesheet dynamically from an accent color hex. Also exports `MAIN_STYLE` (default blue accent).
 - `archive_preview_dialog.py` — `ArchivePreviewDialog`: table-based archive contents viewer with selective extraction
 - `crawler_page.py` — `CrawlerPage`: visual web crawler with embedded Chromium browser (QWebEngineView). Features: URL navigation, element inspection (hover highlight + click to capture CSS/XPath selectors), field extraction rules with live preview, pagination workflow config, anti-crawl options (delay, UA, proxy, retries), site feasibility checking (robots.txt, JS requirement, CAPTCHA detection), debug/full crawl modes, data preview table, config save/load, and data export. Uses QWebChannel for JS→Python bridge (injected inspector JavaScript communicates element info back to Python). Manages its own `SiteCheckWorker` and `CrawlWorker` internally.
@@ -139,10 +139,10 @@ Paths below are relative to `code/` unless stated otherwise.
 - `voice_protocol.py` — `VoiceClient`: full-duplex voice over LAN using UDP **unicast** + PyAudio. 16-bit mono PCM at 22050 Hz, 20ms frames. One client per room participant. Optional — reported unavailable if PyAudio is missing. **The voice port must come from `utils.constants.voice_port_for_room(room_port)`** — never `room_port + 2`, which collides with `ROOM_DISCOVERY_PORT` (12347) at the default port and kills voice on the host side. `start()` binds the playback socket and opens the audio device **synchronously** and returns `False` on failure.
 
 **Utils** (`utils/`):
-- `constants.py` — Port defaults (TCP 12345, UDP discovery 12346, room discovery 12347), buffer size, message protocol type strings (transfer, room, voice), file extension sets, volume suffix patterns
+- `constants.py` — **single source of truth for app identity** (`APP_NAME_ZH` 帽兜工具, `APP_NAME_EN` "LIWEN Tool", `APP_NAME_SLUG` `LIWENTool`, `APP_REPAIR_SLUG`, `APP_SETUP_SLUG`, `APP_VERSION`, `APP_AUTHOR`, `APP_EMAIL`, plus `LEGACY_APP_SLUG` for upgrade compatibility), port defaults (TCP 12345, UDP discovery 12346, room discovery 12347), `voice_port_for_room()`, buffer size, message protocol type strings (transfer, room, voice), file extension sets, volume suffix patterns
 - `helpers.py` — `format_size()`, `format_speed()`, `hash_file()`, `get_common_parent()`, `get_temp_archive_path()`, `is_archive_file()`, `get_output_archive_name()`, `count_files()`
-- `settings.py` — `Settings` class: persists to `%APPDATA%/ArchiveTool/settings.json`. Keys: `username`, `theme`, `default_receive_path`, `default_password`, `auto_accept`, `lan_default_port`, `room_default_password`, `room_voice_enabled`, `crawler_default_delay`, `crawler_default_timeout`, `crawler_max_retries`, `crawler_default_ua`, `crawler_export_path`. Exposes module-level `settings` singleton. Also defines `ACCENT_COLORS` dict and computed properties `accent_color`, `theme_name`.
-- `room_store.py` — `RoomStore`: persists saved rooms to `%APPDATA%/ArchiveTool/rooms.json`. CRUD operations for room dicts keyed by `room_id`. Exposes module-level `room_store` singleton.
+- `settings.py` — `Settings` class: persists to `%APPDATA%/LIWENTool/settings.json`. Keys: `username`, `theme`, `default_receive_path`, `default_password`, `auto_accept`, `lan_default_port`, `room_default_password`, `room_voice_enabled`, `crawler_default_delay`, `crawler_default_timeout`, `crawler_max_retries`, `crawler_default_ua`, `crawler_export_path`. Exposes module-level `settings` singleton. Also defines `ACCENT_COLORS` dict and computed properties `accent_color`, `theme_name`.
+- `room_store.py` — `RoomStore`: persists saved rooms to `%APPDATA%/LIWENTool/rooms.json`. CRUD operations for room dicts keyed by `room_id`. Exposes module-level `room_store` singleton.
 - `logger.py` — Application-wide file logger writing to `data/log.txt` (see `utils.paths.data_dir()`). Overwrites on each startup. Provides `info()`, `warn()`, `error()`, `function_scope(name)` context manager for function entry/exit logging, `install_crash_handler()` (global `sys.excepthook` that logs traceback + shows QMessageBox popup), and `setup_logging()` (initializes the log file with header info). Called early in `main.py` before QApplication, and also in `repair_tool.py`.
 - `jsonstore.py` — `load_json()` / `save_json()` / `ensure_dir()`: atomic JSON persistence (`mkstemp` → `fsync` → `os.replace`, module lock, never raises). **Use this for every persisted JSON file** instead of `open() + json.dump`.
 - `paths.py` — **Single source of truth for filesystem paths** (`project_root()`, `static_dir()`, `data_dir()`, `dist_dir()`, `static_path()`). Use this instead of hand-rolled `dirname()` chains; it transparently handles the frozen/source split.
@@ -158,7 +158,7 @@ Paths below are relative to `code/` unless stated otherwise.
 - `shortcut.py` — Creates Windows `.lnk` shortcuts (used by setup.py)
 
 **Repair tool** (`repair_tool.py`):
-- Standalone PyQt6 EXE entry point (`ArchiveTool_Repair.exe`). Reads `repair_task.json` (written by `DiagnosticPage`), runs targeted repairs via `RepairThread`, then restarts the main `ArchiveTool.exe`. Falls back to global repair mode (run all checks → fix what's broken) if no task file exists. Uses file-based locking to prevent concurrent instances. Shares check/repair logic with `DiagnosticPage` by importing from `ui/diagnostic_page.py`.
+- Standalone PyQt6 EXE entry point (`LIWENTool_Repair.exe`). Reads `repair_task.json` (written by `DiagnosticPage`), runs targeted repairs via `RepairThread`, then restarts the main `LIWENTool.exe`. Falls back to global repair mode (run all checks → fix what's broken) if no task file exists. Uses file-based locking to prevent concurrent instances. Shares check/repair logic with `DiagnosticPage` by importing from `ui/diagnostic_page.py`.
 
 **CLI layer** (`cli/`):
 - `__init__.py` — `run_cli(argv)`: builds the argparse tree from the command modules and dispatches. Reached from `main.py` whenever `len(sys.argv) > 1`, so CLI mode never imports Qt.
@@ -184,6 +184,17 @@ Paths below are relative to `code/` unless stated otherwise.
 
 ## Key patterns
 
+- **App naming (单一来源)**: all names live in `utils/constants.py` — never hard-code them again.
+  | 用途 | 值 |
+  |---|---|
+  | 中文名（界面、窗口标题） | `APP_NAME_ZH` = `帽兜工具` |
+  | 英文名（仓库、文档、发行说明） | `APP_NAME_EN` = `LIWEN Tool` |
+  | 可执行文件 / onedir / 数据目录 | `APP_NAME_SLUG` = `LIWENTool`（**无空格**，避免路径必须加引号） |
+  | 修复工具 | `APP_REPAIR_SLUG` = `LIWENTool_Repair` |
+  | 安装程序 | `APP_SETUP_SLUG` = `LIWENTool_Setup` |
+
+  上一代英文名 `ArchiveTool` 只保留在 `LEGACY_APP_SLUG` / `LEGACY_APP_REPAIR_SLUG`，**仅用于
+  升级兼容**（旧数据目录迁移、旧安装目录查找、旧注册表项清理），新代码不要引用。
 - **Adding a new archive format**: Create a new file in `core/formats/`, subclass `ArchiveHandler`, implement all abstract methods, decorate with `@register_handler`. Import it in `core/formats/__init__.py`. No changes needed to workers, UI, or helpers — everything auto-discovers through `FormatRegistry`.
 - All long-running operations run on `QThread` subclasses (in `core/workers.py`), never on the main thread
 - Core compression/decompression functions are pure and don't import PyQt — they take callbacks for progress reporting
@@ -202,7 +213,7 @@ Paths below are relative to `code/` unless stated otherwise.
 - Crawler element inspection uses injected JavaScript (see `INSPECTOR_JS` in `crawler_page.py`): hover shows blue highlight, click captures CSS selector + XPath + text, shows green highlight on selected + yellow on all matching elements. Press Escape to exit selection mode.
 - The embedded QWebEngineView is only for visual configuration; actual crawling uses `requests` + `lxml` in `CrawlerEngine` for speed.
 - **Sidebar navigation**: `MainWindow` has 5 sidebar categories (本机, 局域网, 互联网, 设置, 关于). Categories with multiple sub-pages use `_make_category_with_sub_tabs()` which creates a sub-tab bar + inner `QStackedWidget`. Categories with a single page show the widget directly. `MainWindow._switch_category(idx)` switches the outer `main_stack`; `_switch_sub_page(cat_idx, sub_idx)` switches the inner stack and updates button states.
-- **Diagnostic → Repair workflow**: `DiagnosticPage` runs checks via `DiagnosticWorker`. If issues found, user can: (a) "一键修复" — run repairs in-process via `RepairWorker`, then auto re-run checks to verify; or (b) "进行修复" — serialize issues to `repair_task.json`, launch `repair_tool.py` as a detached process, and quit the main app. The repair EXE reads the task file, runs `RepairThread`, restarts `ArchiveTool.exe` on completion.
+- **Diagnostic → Repair workflow**: `DiagnosticPage` runs checks via `DiagnosticWorker`. If issues found, user can: (a) "一键修复" — run repairs in-process via `RepairWorker`, then auto re-run checks to verify; or (b) "进行修复" — serialize issues to `repair_task.json`, launch `repair_tool.py` as a detached process, and quit the main app. The repair EXE reads the task file, runs `RepairThread`, restarts `LIWENTool.exe` on completion.
 - **Space index pipeline**: `SpaceIndexPage` → user selects drive → `ScanEngine` (QThread) walks dir tree via `os.scandir` → writes to `IndexDatabase` (SQLite WAL) → `FileIndexModel` (QAbstractItemModel) provides lazy-loaded tree data → `QTreeView` with `QSortFilterProxyModel` → `BarChartWidget` renders top 80 items visually. The scan has 3 phases: (1) collect files + dir placeholders with batch DB writes, (2) bottom-up directory size aggregation, (3) write final directory entries to DB.
 - **Logging requirement**: Every function or feature (including newly added ones) MUST log its execution to `data/log.txt` (`utils/logger.py`, path via `utils.paths.data_dir()`). Use `info()` for entry/exit, `error()` for failures, `warn()` for warnings. The log file is overwritten on each app startup. Use `utils.logger.function_scope(name)` context manager for function-level entry/exit logging. On unhandled exceptions, `install_crash_handler()` (called in `main.py` after QApplication creation) logs the full traceback and shows a QMessageBox popup with error details before the process exits.
 - **Adding a new path**: never hardcode a directory relative to the current file. Add a helper to `utils/paths.py` (or reuse `static_path()` / `data_dir()`), so source and frozen runs both resolve correctly.
@@ -273,7 +284,7 @@ These were real, reproduced defects. Do not reintroduce the old patterns.
 
 ## Version management
 
-The current version is stored in `ui/about_page.py` as `APP_VERSION`. When making changes, update the version according to these rules:
+The current version is stored in **`utils/constants.py`** as `APP_VERSION` (re-exported by `ui/about_page.py` for backwards compatibility, and consumed by both installers so they can never drift out of sync again). When making changes, update the version according to these rules:
 
 - **Bug fixes / code optimization / minor tweaks**: increment the patch version (e.g. 1.0.0 → 1.0.1)
 - **Feature additions / mechanism upgrades / functional changes**: increment the minor version (e.g. 1.0.0 → 1.1.0)

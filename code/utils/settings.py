@@ -1,11 +1,13 @@
 import copy
 import os
+import shutil
 import sys
 import socket
 
 from utils import jsonstore
+from utils.constants import APP_NAME_SLUG, LEGACY_APP_SLUG
 
-APP_DIR_NAME = "ArchiveTool"
+APP_DIR_NAME = APP_NAME_SLUG
 
 
 def _get_app_data_dir() -> str:
@@ -17,6 +19,59 @@ def _get_app_data_dir() -> str:
     else:
         base = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
     return os.path.join(base, APP_DIR_NAME)
+
+
+def _legacy_app_data_dir() -> str:
+    """上一代英文名（ArchiveTool）对应的数据目录，用于一次性迁移。"""
+    return os.path.join(os.path.dirname(_get_app_data_dir()), LEGACY_APP_SLUG)
+
+
+def _migrate_legacy_data_dir(new_dir: str) -> bool:
+    """把旧数据目录的内容搬到新目录（一次性，尽力而为）。
+
+    英文名从 ArchiveTool 改为 LIWEN Tool 后目录名随之变化；若不迁移，老用户的
+    配置、房间、AI 会话、HTTP 历史会看起来"凭空消失"。这里做的是**复制**而非
+    移动 —— 旧目录原样保留，用户确认无误后可自行删除，避免迁移中途出错就两头空。
+
+    只在「新目录不存在或为空」时执行，绝不覆盖已有数据。任何异常都只记日志，
+    不影响程序启动。
+    """
+    legacy = _legacy_app_data_dir()
+    if os.path.abspath(legacy) == os.path.abspath(new_dir):
+        return False
+    if not os.path.isdir(legacy):
+        return False
+    try:
+        if os.path.isdir(new_dir) and os.listdir(new_dir):
+            return False
+        os.makedirs(new_dir, exist_ok=True)
+        copied = 0
+        for name in os.listdir(legacy):
+            src = os.path.join(legacy, name)
+            dst = os.path.join(new_dir, name)
+            if os.path.exists(dst):
+                continue
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+            copied += 1
+        if copied:
+            _log(f"已从旧数据目录迁移 {copied} 项: {legacy} -> {new_dir}")
+        return copied > 0
+    except Exception as e:  # noqa: BLE001 — 迁移失败不能影响启动
+        _log(f"旧数据目录迁移失败（已忽略）: {e}")
+        return False
+
+
+def _log(msg: str) -> None:
+    """延迟导入 logger，避免 settings <-> logger 循环依赖。"""
+    try:
+        from utils.logger import info
+        info(msg)
+    except Exception:  # noqa: BLE001
+        pass
+
 
 
 def _is_writable_dir(path: str) -> bool:
@@ -48,6 +103,10 @@ def _resolve_settings_dir() -> tuple:
     ]
     for i, candidate in enumerate(candidates):
         if _is_writable_dir(candidate):
+            if i == 0:
+                # 只有落在标准数据目录时才做旧目录迁移（降级目录不做，
+                # 否则会把降级目录当成"新家"而误导后续启动）
+                _migrate_legacy_data_dir(candidate)
             return candidate, i > 0
     import tempfile
     return os.path.join(tempfile.gettempdir(), APP_DIR_NAME), True

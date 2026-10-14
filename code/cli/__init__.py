@@ -1,6 +1,6 @@
 """CLI entry point for 帽兜工具.
 
-Usage: ArchiveTool.exe <command> [<subcommand>] [--options]
+Usage: LIWENTool.exe <command> [<subcommand>] [--options]
 
 If no command is given, the GUI launches as normal.
 """
@@ -21,9 +21,10 @@ COMMAND_MODULES = [
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from utils.constants import APP_NAME_SLUG
     parser = argparse.ArgumentParser(
-        prog="ArchiveTool",
-        description="帽兜工具 CLI — 文件压缩/传输/爬虫/HTTP请求/AI/空间分析",
+        prog=APP_NAME_SLUG,
+        description="帽兜工具 (LIWEN Tool) CLI — 文件压缩/传输/爬虫/HTTP请求/AI/空间分析",
     )
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
 

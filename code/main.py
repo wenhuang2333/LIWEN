@@ -12,7 +12,7 @@ def _setup_console():
     """Attach to parent console for CLI output in frozen --windowed builds.
 
     PyInstaller --windowed builds discard stdout/stderr entirely.
-    When the user runs 'ArchiveTool.exe compress ...' from cmd.exe,
+    When the user runs 'LIWENTool.exe compress ...' from cmd.exe,
     we attach to that console.  When double-clicked with arguments
     (rare), we allocate a fresh console so output is still visible.
     """
@@ -133,9 +133,10 @@ def _set_app_user_model_id():
     if sys.platform != "win32":
         return
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "ShiShangYue.MaoDouTool"
-        )
+        from utils.constants import APP_VENDOR_SLUG, APP_NAME_SLUG
+        # 由常量派生，避免改名后这里残留旧标识；保持纯 ASCII（Windows 要求）
+        app_id = f"{APP_VENDOR_SLUG}.{APP_NAME_SLUG}"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
     except Exception:
         pass
 

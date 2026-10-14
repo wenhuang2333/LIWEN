@@ -1,6 +1,6 @@
 # obj/ — 文档目录
 
-本目录集中存放 **帽兜工具** 项目的全部文档。
+本目录集中存放 **帽兜工具**（英文名 **LIWEN Tool**）项目的全部文档。
 
 > 目录约定：`code/` 放代码、`static/` 放静态资源、`obj/` 放文档、`data/` 放运行时数据。
 > 详见 [开发文档.md](开发文档.md) 第 2 节。
@@ -73,7 +73,7 @@ python code/main.py
 python code/main.py --help
 
 # 构建
-python code/build.py app        # 主程序 onedir → dist/ArchiveTool/
+python code/build.py app        # 主程序 onedir → dist/LIWENTool/
 python code/build.py clean      # 清理构建产物
 
 # 安装依赖

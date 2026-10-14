@@ -7,11 +7,13 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
 from utils.paths import static_path
-
-APP_NAME = "帽兜工具"
-APP_VERSION = "4.16.1"
-APP_AUTHOR = "十山月"
-APP_EMAIL = "1275679733@qq.com"
+from utils.constants import (
+    APP_NAME_ZH as APP_NAME,
+    APP_NAME_EN,
+    APP_VERSION,
+    APP_AUTHOR,
+    APP_EMAIL,
+)
 APP_DESCRIPTION = (
     "一款集文件压缩/解压、局域网文件传输、局域网联机大厅、VPN隧道联机、"
     "可视化网页爬虫、HTTP请求发送、AI对话、磁盘空间分析、故障检测与修复"
@@ -111,6 +113,11 @@ class AboutPage(QWidget):
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name_lbl.setStyleSheet("font-size: 20px; font-weight: 700; color: #e8e8f0;")
         card_layout.addWidget(name_lbl)
+
+        en_lbl = QLabel(APP_NAME_EN)
+        en_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        en_lbl.setStyleSheet("font-size: 13px; color: #a6adc8; letter-spacing: 1px;")
+        card_layout.addWidget(en_lbl)
 
         ver_lbl = QLabel(f"版本 {APP_VERSION}")
         ver_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)

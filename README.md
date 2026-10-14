@@ -1,4 +1,4 @@
-# 帽兜工具 · ArchiveTool
+# 帽兜工具 · LIWEN Tool
 
 一款集 **文件压缩/解压、局域网文件传输、局域网联机大厅、VPN 隧道联机、可视化网页爬虫、
 HTTP 请求发送、AI 对话、磁盘空间分析、故障检测与修复** 于一体的跨平台桌面工具。
@@ -46,8 +46,8 @@ python code/main.py preview out.7z
 ### 构建安装包
 
 ```bash
-python code/build.py app         # onedir 构建 → dist/ArchiveTool/
-python code/build.py repair      # 修复工具 → dist/ArchiveTool_Repair/
+python code/build.py app         # onedir 构建 → dist/LIWENTool/
+python code/build.py repair      # 修复工具 → dist/LIWENTool_Repair/
 python code/build.py installer   # 打包为 setup.exe（仅 Windows）
 python code/build.py dmg         # macOS .dmg
 python code/build.py tarball     # Linux 便携包

@@ -19,10 +19,19 @@ from installer.shortcut import (
     create_shortcut, get_desktop_path, get_start_menu_programs_path,
 )
 
-APP_NAME = "帽兜工具"
-APP_VERSION = "4.15.0"
-APP_PUBLISHER = "十山月"
-APP_EMAIL = "1275679733@qq.com"
+# 应用标识统一来自 utils/constants.py，避免各处写死版本号后不同步
+_CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _CODE_DIR not in sys.path:
+    sys.path.insert(0, _CODE_DIR)
+from utils.constants import (  # noqa: E402
+    APP_NAME_ZH as APP_NAME,
+    APP_NAME_EN,
+    APP_VERSION,
+    APP_AUTHOR as APP_PUBLISHER,
+    APP_EMAIL,
+    APP_NAME_SLUG,
+    LEGACY_APP_SLUG,
+)
 DEFAULT_INSTALL_DIR = os.path.join(
     os.environ.get("ProgramFiles", "C:\\Program Files"), APP_NAME)
 
@@ -32,7 +41,7 @@ else:
     # installer/ 位于 code/ 下一级 → 上溯两级即项目根目录
     BUNDLE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-ARCHIVE_TAR_XZ = os.path.join(BUNDLE_DIR, "ArchiveTool.tar.xz")
+ARCHIVE_TAR_XZ = os.path.join(BUNDLE_DIR, f"{APP_NAME_SLUG}.tar.xz")
 
 # 项目根目录（仅源码运行时的 dist/ 回退查找使用）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -365,7 +374,8 @@ class SetupWizard(tk.Tk):
         for root, dirs, files in os.walk(install_dir):
             dirs[:] = [d for d in dirs if "repair" not in d.lower()]
             for f in files:
-                if f.lower().endswith(".exe") and "ArchiveTool" in f:
+                if f.lower().endswith(".exe") and (
+                        APP_NAME_SLUG in f or LEGACY_APP_SLUG in f):
                     return os.path.join(root, f)
         for root, dirs, files in os.walk(install_dir):
             dirs[:] = [d for d in dirs if "repair" not in d.lower()]
@@ -489,7 +499,7 @@ def main():
 
     if not os.path.exists(ARCHIVE_TAR_XZ):
         # Running from source — look in <project root>/dist/
-        alt = os.path.join(PROJECT_ROOT, "dist", "ArchiveTool.tar.xz")
+        alt = os.path.join(PROJECT_ROOT, "dist", f"{APP_NAME_SLUG}.tar.xz")
         if os.path.exists(alt):
             import builtins
             globals()["ARCHIVE_TAR_XZ"] = alt
@@ -498,7 +508,7 @@ def main():
             root.withdraw()
             messagebox.showerror(
                 "错误",
-                f"找不到安装包数据。\n\n请确保 ArchiveTool.tar.xz 与安装程序在同一目录。")
+                f"找不到安装包数据。\n\n请确保 {APP_NAME_SLUG}.tar.xz 与安装程序在同一目录。")
             return
 
     app = SetupWizard()

@@ -28,9 +28,17 @@ REPAIR_SCRIPT = os.path.join(CODE_DIR, "repair_tool.py")
 DIST_DIR = os.path.join(PROJECT_ROOT, "dist")
 BUILD_DIR = os.path.join(PROJECT_ROOT, "build")
 STATIC_DIR = os.path.join(PROJECT_ROOT, "static")
-APP_NAME = "ArchiveTool"
-REPAIR_NAME = "ArchiveTool_Repair"
-SETUP_NAME = "ArchiveTool_Setup"
+# 应用标识统一来自 utils/constants.py（中文名「帽兜工具」/ 英文名「LIWEN Tool」）
+sys.path.insert(0, CODE_DIR)
+from utils.constants import (  # noqa: E402
+    APP_NAME_SLUG as APP_NAME,
+    APP_NAME_ZH,
+    APP_VENDOR_SLUG,
+    APP_REPAIR_SLUG as REPAIR_NAME,
+    APP_SETUP_SLUG as SETUP_NAME,
+    LEGACY_APP_SLUG,
+    LEGACY_APP_REPAIR_SLUG,
+)
 
 
 def _wintun_binary():
@@ -520,8 +528,9 @@ def build_dmg():
             f.write('<plist version="1.0">\n<dict>\n')
             f.write(f'    <key>CFBundleExecutable</key>\n    <string>launch</string>\n')
             f.write(f'    <key>CFBundleName</key>\n    <string>{APP_NAME}</string>\n')
-            f.write(f'    <key>CFBundleDisplayName</key>\n    <string>帽兜工具</string>\n')
-            f.write('    <key>CFBundleIdentifier</key>\n    <string>com.shishanyue.archivetool</string>\n')
+            f.write(f'    <key>CFBundleDisplayName</key>\n    <string>{APP_NAME_ZH}</string>\n')
+            bundle_id = f"com.{APP_VENDOR_SLUG.lower()}.{APP_NAME.lower()}"
+            f.write(f'    <key>CFBundleIdentifier</key>\n    <string>{bundle_id}</string>\n')
             f.write(f'    <key>CFBundleVersion</key>\n    <string>1.0</string>\n')
             f.write('    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n')
             f.write('</dict>\n</plist>\n')
