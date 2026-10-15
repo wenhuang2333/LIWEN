@@ -23,6 +23,8 @@ MSG_ROOM_JOIN_ACCEPT = "room_join_accept"
 MSG_ROOM_JOIN_REJECT = "room_join_reject"
 MSG_HEARTBEAT = "heartbeat"
 MSG_HEARTBEAT_ACK = "heartbeat_ack"
+# 房主下发的成员名单（随心跳回包携带）
+MSG_ROOM_ROSTER = "room_roster"
 
 # Session management
 HEARTBEAT_INTERVAL = 3      # seconds between heartbeats
@@ -71,6 +73,39 @@ def is_valid_voice_port(port: int) -> bool:
         return False
 
 
+# ── 房间内文件传输端口 ─────────────────────────────────────────
+# 房间成员之间互传文件时，每个成员都要有一个确定的监听端口。沿用与语音相同
+# 的「由房间端口散列」思路，但换到独立区间，避免与语音（12400-12799）、房间
+# 发现（12347）、设备发现（12346）冲突。
+ROOM_DATA_PORT_BASE = 12800
+ROOM_DATA_PORT_SPAN = 400
+
+
+def room_data_port_for_room(room_port: int) -> int:
+    """由房间端口推出房间内文件传输的 TCP 端口。
+
+    所有参与者算出同一个值，因此不需要额外协商。散列命中保留端口
+    （房间自身端口、加入端口、语音端口、发现端口）时顺序后移。
+    """
+    try:
+        room_port = int(room_port)
+    except (TypeError, ValueError):
+        room_port = DEFAULT_TCP_PORT
+
+    reserved = {
+        DEFAULT_TCP_PORT, DISCOVERY_PORT, ROOM_DISCOVERY_PORT,
+        room_port, room_port + 1, voice_port_for_room(room_port),
+    }
+    port = ROOM_DATA_PORT_BASE + (room_port * 8) % ROOM_DATA_PORT_SPAN
+    for _ in range(ROOM_DATA_PORT_SPAN):
+        if port not in reserved and 1 <= port <= 65535:
+            return port
+        port += 1
+        if port >= ROOM_DATA_PORT_BASE + ROOM_DATA_PORT_SPAN:
+            port = ROOM_DATA_PORT_BASE
+    return ROOM_DATA_PORT_BASE
+
+
 def get_archive_extensions():
     from core.formats import FormatRegistry
     return FormatRegistry.all_extensions()
@@ -88,13 +123,14 @@ VOLUME_SUFFIX_PATTERNS = [".7z.001", ".zip.001", ".part01.rar", ".r01"]
 # 可执行文件/构建产物/目录名去掉空格，避免命令行与路径必须加引号。
 APP_NAME_ZH = "帽兜工具"
 APP_NAME_EN = "LIWEN Tool"
-APP_VERSION = "4.16.1"
+APP_VERSION = "4.17.0"
 APP_VENDOR_SLUG = "ShiShangYue"      # ASCII 厂商标识，用于 AppUserModelID / Bundle ID
 APP_AUTHOR = "十山月"
 APP_EMAIL = "1275679733@qq.com"
 APP_NAME_SLUG = "LIWENTool"          # 无空格写法：exe / onedir / 数据目录
 APP_REPAIR_SLUG = "LIWENTool_Repair"  # 修复工具
 APP_SETUP_SLUG = "LIWENTool_Setup"    # 安装程序
+APP_INSTALL_SLUG = "LIWEN"            # 安装目录名（Program Files\LIWEN）
 
 # 上一代英文名，仅用于兼容旧数据目录与旧注册表项，不要在新代码中引用
 LEGACY_APP_SLUG = "ArchiveTool"

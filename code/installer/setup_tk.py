@@ -30,10 +30,12 @@ from utils.constants import (  # noqa: E402
     APP_AUTHOR as APP_PUBLISHER,
     APP_EMAIL,
     APP_NAME_SLUG,
+    APP_INSTALL_SLUG,
     LEGACY_APP_SLUG,
 )
+# 与 setup.py 保持一致：安装目录名固定为 LIWEN（单一来源 constants.py）
 DEFAULT_INSTALL_DIR = os.path.join(
-    os.environ.get("ProgramFiles", "C:\\Program Files"), APP_NAME)
+    os.environ.get("ProgramFiles", "C:\\Program Files"), APP_INSTALL_SLUG)
 
 if getattr(sys, "frozen", False):
     BUNDLE_DIR = sys._MEIPASS
@@ -239,7 +241,7 @@ class SetupWizard(tk.Tk):
     def _browse_folder(self):
         folder = filedialog.askdirectory(title="选择安装目录", parent=self)
         if folder:
-            self._install_dir.set(os.path.join(folder, APP_NAME))
+            self._install_dir.set(os.path.join(folder, APP_INSTALL_SLUG))
 
     # ── Page 2: Install ──
 

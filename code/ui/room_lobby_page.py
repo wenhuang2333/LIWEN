@@ -6,6 +6,7 @@ All communication uses real LAN IP addresses.
 """
 
 import hashlib
+import socket
 import uuid
 
 from PyQt6.QtWidgets import (
@@ -16,9 +17,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 
 from ui.room_page import RoomPage
-from core.workers import RoomHostWorker, RoomScanWorker, RoomJoinWorker
+from core.workers import (
+    RoomHostWorker, RoomScanWorker, RoomJoinWorker, RoomSessionWorker,
+)
 from utils.room_store import room_store
 from utils.settings import settings
+from utils.constants import room_data_port_for_room
 
 
 class LobbyView(QWidget):
@@ -315,10 +319,20 @@ class RoomLobbyPage(QWidget):
         self._host_worker = None
         self._scan_worker = None
         self._join_worker = None
+        self._session_worker = None
 
         self._setup_ui()
         self._connect_signals()
         self._lobby._refresh_saved()
+
+    def _username(self) -> str:
+        """房间内统一使用设置里的昵称。
+
+        原实现走的是 ``socket.gethostname()``，于是房间成员显示成
+        ``xxxdeMacBook-Air.local``，而同一个应用的「局域网传输」页用的是
+        ``settings.username`` —— 两套称呼、互相对不上。
+        """
+        return settings.username or socket.gethostname()
 
     def _setup_ui(self):
         root = QVBoxLayout(self)
@@ -351,12 +365,23 @@ class RoomLobbyPage(QWidget):
     # ── Create room ──
 
     def _on_create_room(self, room_info: dict):
+        room_info = dict(room_info)
+        room_info.setdefault("peer_id", "host")
+        room_info.setdefault("username", self._username())
+        # 显式下发文件传输端口，避免两端各自推导后因版本差异对不上
+        room_info.setdefault(
+            "data_port", room_data_port_for_room(room_info.get("port", 0)))
         self._current_room = room_info
 
+        # Stop any stale session (e.g. re-hosting a saved room)
+        self._stop_session()
+
         # Start broadcasting room on LAN
-        self._host_worker = RoomHostWorker(room_info)
+        self._host_worker = RoomHostWorker(room_info, self._username())
         self._host_worker.error.connect(
             lambda e: self._lobby.set_scan_status(f"房间广播错误: {e}"))
+        # 房主自己也要看到谁进来了
+        self._host_worker.roster_updated.connect(self._on_roster)
         self._host_worker.start()
 
         # Configure and show room page
@@ -439,7 +464,8 @@ class RoomLobbyPage(QWidget):
                 self._join_worker.error.disconnect()
             except TypeError:
                 pass
-        self._join_worker = RoomJoinWorker(host_ip, port, room_id, password)
+        self._join_worker = RoomJoinWorker(
+            host_ip, port, room_id, password, username=self._username())
         self._join_worker.finished.connect(self._on_join_result)
         self._join_worker.error.connect(
             lambda e: self._lobby.set_scan_status(f"加入失败: {e}"))
@@ -462,7 +488,61 @@ class RoomLobbyPage(QWidget):
         self._current_room = room_info
         self._room_view.set_room_context(room_info)
         self._stack.setCurrentIndex(1)
+        self._start_session(room_info)
         self.room_entered.emit(room_info)
+
+    # ── Room session (heartbeat + roster) ──
+
+    def _start_session(self, room_config: dict):
+        """建立房间会话：心跳保活并接收房主下发的成员名单。
+
+        没有这一步时客户端从不发心跳，房主 10 秒后就把成员全部剔除，
+        而且客户端也拿不到任何成员信息（语音和文件传输都没有目标）。
+        """
+        self._stop_session()
+        self._session_worker = RoomSessionWorker(room_config, self._username())
+        self._session_worker.roster_updated.connect(self._on_roster)
+        self._session_worker.session_lost.connect(self._on_session_lost)
+        self._session_worker.error.connect(
+            lambda e: self._lobby.set_scan_status(f"房间会话错误: {e}"))
+        self._session_worker.start()
+
+    def _stop_session(self):
+        worker = self._session_worker
+        self._session_worker = None
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.cancel()
+                worker.wait(3000)
+        except Exception:
+            pass
+
+    def _on_roster(self, roster: list):
+        self._room_view.update_peers(roster)
+
+    def _on_session_lost(self):
+        """会话失效：明确告知用户并退回大厅，而不是留在一个死房间里。"""
+        self._room_view.on_session_lost()
+        QMessageBox.warning(
+            self, "会话已失效",
+            "与房间主机的连接已中断（房主可能已重启）。\n"
+            "请返回大厅后重新加入房间。")
+        self._leave_room_ui()
+
+    def _leave_room_ui(self):
+        self._stop_session()
+        self._room_view.shutdown()
+        if self._host_worker and self._host_worker.isRunning():
+            self._host_worker.cancel()
+            self._host_worker.wait(3000)
+        if self._join_worker and self._join_worker.isRunning():
+            self._join_worker.cancel()
+            self._join_worker.wait(3000)
+        self._current_room = None
+        self._stack.setCurrentIndex(0)
+        self._lobby._refresh_saved()
 
     # ── Scan rooms ──
 
@@ -473,7 +553,7 @@ class RoomLobbyPage(QWidget):
                 self._scan_worker.finished.disconnect(self._on_scan_result)
             except TypeError:
                 pass
-        self._scan_worker = RoomScanWorker()
+        self._scan_worker = RoomScanWorker(self._username())
         self._scan_worker.finished.connect(self._on_scan_result)
         self._scan_worker.start()
 
@@ -488,16 +568,7 @@ class RoomLobbyPage(QWidget):
     # ── Leave room ──
 
     def _on_leave_room(self):
-        self._room_view.shutdown()
-        if self._host_worker and self._host_worker.isRunning():
-            self._host_worker.cancel()
-            self._host_worker.wait(3000)
-        if self._join_worker and self._join_worker.isRunning():
-            self._join_worker.cancel()
-            self._join_worker.wait(3000)
-        self._current_room = None
-        self._stack.setCurrentIndex(0)
-        self._lobby._refresh_saved()
+        self._leave_room_ui()
         self.room_left.emit()
 
     # ── Delete saved room ──
@@ -513,6 +584,7 @@ class RoomLobbyPage(QWidget):
         return self._room_view
 
     def cleanup(self):
+        self._stop_session()
         self._room_view.shutdown()
         if self._current_room:
             self._on_leave_room()

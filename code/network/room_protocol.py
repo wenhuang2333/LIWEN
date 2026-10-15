@@ -20,12 +20,19 @@ from utils.constants import (
     MSG_ROOM_INFO, MSG_ROOM_JOIN_REQUEST, MSG_ROOM_JOIN_CHALLENGE,
     MSG_ROOM_JOIN_RESPONSE, MSG_ROOM_JOIN_ACCEPT, MSG_ROOM_JOIN_REJECT,
     MSG_HEARTBEAT, MSG_HEARTBEAT_ACK, BUFFER_SIZE,
+    room_data_port_for_room,
 )
 from network.transfer import _send_header, _recv_header
+# 只导入 warn：本模块里 `info` 被大量用作局部变量名（对端信息字典），
+# 模块级导入会被遮蔽。
+from utils.logger import warn
 
 HEADER_ENCODING = "utf-8"
 HEARTBEAT_INTERVAL = 3   # seconds
 HEARTBEAT_TIMEOUT = 10   # seconds — auto-kick after this
+
+# 房主在成员名单里的固定标识（房主没有 session_id）
+HOST_PEER_ID = "host"
 
 
 def _hash_password(password: str) -> str:
@@ -102,6 +109,30 @@ class RoomHost:
             if session_id in self._peers:
                 del self._peers[session_id]
                 self._player_count = 1 + len(self._peers)
+
+    def build_roster(self) -> list:
+        """当前房间成员名单（房主在前）。
+
+        原协议从不把成员名单发出去：客户端加入后只能看到房主一个人，
+        "在线玩家"列表永远只有一行。名单随心跳回包下发，每个心跳只多几十
+        字节。**名单里刻意不含 session_id** —— 它是房主签发的会话凭证，
+        泄露给同房间其他成员会让别人可以冒名顶替。
+        """
+        roster = [{
+            "peer_id": HOST_PEER_ID,
+            "username": self._username,
+            "ip": _get_local_ip(),
+            "is_host": True,
+        }]
+        with self._peers_lock:
+            for sid, info in self._peers.items():
+                roster.append({
+                    "peer_id": info.get("peer_id") or sid,
+                    "username": info.get("username", ""),
+                    "ip": info.get("ip", ""),
+                    "is_host": False,
+                })
+        return roster
 
     def start(self):
         if self._running:
@@ -225,9 +256,16 @@ class RoomHost:
                     if info is not None:
                         info["last_heartbeat"] = time.time()
                         acked = True
-                if acked:
-                    _send_header(conn, {"type": MSG_HEARTBEAT_ACK,
-                                        "session_id": sid})
+                # 回包里带上成员名单，客户端据此刷新"在线玩家"。
+                # known=False 表示房主不认识这个会话（房主重启过，或成员因网络
+                # 中断超时被剔除）——客户端必须显式告诉用户"会话已失效"，
+                # 而不是继续对着空气发心跳、显示一份永远不会更新的名单。
+                _send_header(conn, {
+                    "type": MSG_HEARTBEAT_ACK,
+                    "session_id": sid,
+                    "known": acked,
+                    "roster": self.build_roster() if acked else [],
+                })
                 return
 
             if metadata.get("type") != MSG_ROOM_JOIN_REQUEST:
@@ -293,6 +331,9 @@ class RoomHost:
                 "session_id": session_id,
                 "host_ip": _get_local_ip(),
                 "host_username": self._username,
+                # 加入即回一份名单，客户端不必等第一个心跳就能画出成员列表
+                "roster": self.build_roster(),
+                "data_port": self._room.get("data_port", 0),
             })
         except (socket.timeout, ConnectionError, OSError, ValueError,
                 json.JSONDecodeError, UnicodeDecodeError):
@@ -414,8 +455,15 @@ class RoomJoinClient:
 
     @staticmethod
     def join_room(host_ip: str, port: int, room_id: str,
-                  password: str = "") -> tuple:
-        """Returns (success: bool, message: str, room_config: dict)."""
+                  password: str = "", username: str = "",
+                  peer_id: str = "") -> tuple:
+        """Returns (success: bool, message: str, room_config: dict).
+
+        *username* 是用户在设置里填的昵称。原实现硬编码 ``socket.gethostname()``，
+        于是联机大厅显示的是机器名（``xxxdeMacBook-Air.local``），而同为局域网
+        功能的「局域网传输」用的是 ``settings.username`` —— 同一个应用里两套
+        称呼，房间里也认不出谁是谁。
+        """
         # port 来自局域网广播的房间信息（可被伪造）。越界端口会让 connect()
         # 抛 OverflowError——它不属于下面捕获的异常，会直接冒泡到界面。
         try:
@@ -425,6 +473,8 @@ class RoomJoinClient:
         if not 1 <= port <= 65534:
             return False, f"房间端口无效: {port}", {}
         join_port = port + 1
+        peer_id = peer_id or uuid.uuid4().hex[:12]
+        username = username or socket.gethostname()
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(15)
         try:
@@ -437,7 +487,8 @@ class RoomJoinClient:
             _send_header(sock, {
                 "type": MSG_ROOM_JOIN_REQUEST,
                 "room_id": room_id,
-                "username": socket.gethostname(),
+                "username": username,
+                "peer_id": peer_id,
             })
 
             response = _recv_header(sock)
@@ -476,6 +527,11 @@ class RoomJoinClient:
                     "session_id": response.get("session_id", ""),
                     "host_ip": host_ip,
                     "host_username": response.get("host_username", ""),
+                    "peer_id": peer_id,
+                    "username": username,
+                    "roster": response.get("roster") or [],
+                    "data_port": response.get("data_port") or
+                                 room_data_port_for_room(response.get("port", port)),
                 }
                 return True, "加入成功", config
 
@@ -498,12 +554,31 @@ class RoomSession:
         self._config = dict(room_config)
         self._username = username or socket.gethostname()
         self._session_id = room_config.get("session_id", "")
+        self._peer_id = room_config.get("peer_id", "")
         self._running = False
         self._heartbeat_thread = None
 
-        # peer_ip → {username, host_username, ...}
+        # 成员名单（房主下发）：peer_id → {username, ip, is_host, peer_id}
         self._peers: dict[str, dict] = {}
         self._peers_lock = threading.Lock()
+
+        # 回调：on_roster(list[dict]) / on_session_lost()
+        self.on_roster = None
+        self.on_session_lost = None
+
+    @property
+    def peer_id(self) -> str:
+        return self._peer_id
+
+    @property
+    def data_port(self) -> int:
+        """房间内文件传输端口（每个成员监听同一个值）。"""
+        port = self._config.get("data_port")
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            port = 0
+        return port or room_data_port_for_room(self.port)
 
     @property
     def session_id(self) -> str:
@@ -525,25 +600,34 @@ class RoomSession:
     def port(self) -> int:
         return self._config.get("port", 0)
 
-    def get_peer_ips(self) -> list[str]:
-        with self._peers_lock:
-            return list(self._peers.keys())
-
     def get_peers(self) -> dict:
         with self._peers_lock:
             return dict(self._peers)
 
-    def add_peer(self, ip: str, info: dict):
+    def get_peer_ips(self) -> list[str]:
+        """除自己以外的成员 IP（语音的发送目标）。"""
         with self._peers_lock:
-            self._peers[ip] = dict(info)
+            peers = list(self._peers.values())
+        my_ip = _get_local_ip()
+        out = []
+        for info in peers:
+            ip = info.get("ip", "")
+            if not ip or ip == my_ip or ip in out:
+                continue
+            out.append(ip)
+        return out
 
-    def remove_peer(self, ip: str):
+    def get_send_targets(self) -> list[dict]:
+        """除自己以外的成员（供房间内文件传输选择目标）。"""
         with self._peers_lock:
-            if ip in self._peers:
-                del self._peers[ip]
+            peers = list(self._peers.values())
+        my_ip = _get_local_ip()
+        return [p for p in peers
+                if p.get("peer_id") != self._peer_id and p.get("ip")
+                and not (p.get("is_host") and p.get("ip") == my_ip)]
 
     def start_heartbeat(self):
-        """Start sending heartbeats to the host."""
+        """启动心跳线程：既用于保活，也是获取成员名单的唯一途径。"""
         if self._running:
             return
         self._running = True
@@ -555,27 +639,79 @@ class RoomSession:
         self._running = False
 
     def _heartbeat_loop(self):
-        host_ip = self._config.get("host_ip", "")
-        join_port = self._config.get("port", 0) + 1
-
         while self._running:
-            time.sleep(HEARTBEAT_INTERVAL)
-            if not self._running:
-                break
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
-                sock.connect((host_ip, join_port))
-                _send_header(sock, {
-                    "type": MSG_HEARTBEAT,
-                    "session_id": self._session_id,
-                    "username": self._username,
-                })
-                # Read ack (or any response)
+            self._send_heartbeat_once()
+            # 分片睡眠：stop() 后最多 0.1s 退出，不用等满一个心跳周期
+            for _ in range(int(HEARTBEAT_INTERVAL * 10)):
+                if not self._running:
+                    break
+                time.sleep(0.1)
+
+    def _send_heartbeat_once(self):
+        """发一次心跳并处理回包（成员名单 / 会话失效）。"""
+        host_ip = self._config.get("host_ip", "")
+        try:
+            join_port = int(self._config.get("port", 0)) + 1
+        except (TypeError, ValueError):
+            return
+        if not host_ip or not 1 <= join_port <= 65535:
+            return
+
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((host_ip, join_port))
+            _send_header(sock, {
+                "type": MSG_HEARTBEAT,
+                "session_id": self._session_id,
+                "username": self._username,
+                "peer_id": self._peer_id,
+            })
+            ack = _recv_header(sock)
+        except Exception:
+            # 单次心跳失败（房主忙、瞬时丢包）不致命，下一轮会重试
+            return
+        finally:
+            if sock is not None:
                 try:
-                    _recv_header(sock)
-                except Exception:
+                    sock.close()
+                except OSError:
                     pass
-                sock.close()
-            except Exception:
-                pass
+
+        if not isinstance(ack, dict) or ack.get("type") != MSG_HEARTBEAT_ACK:
+            return
+
+        if not ack.get("known", True):
+            # 房主不认识这个会话：房主重启过，或本机因网络中断超时被剔除。
+            # 必须让界面知道，而不是继续对着空气发心跳、显示一份永不更新的名单。
+            self._running = False
+            if self.on_session_lost:
+                self.on_session_lost()
+            return
+
+        roster = ack.get("roster")
+        if isinstance(roster, list):
+            self._update_roster(roster)
+
+    def _update_roster(self, roster):
+        peers = {}
+        for item in roster:
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("peer_id") or item.get("ip") or ""
+            if not pid:
+                continue
+            peers[pid] = {
+                "peer_id": pid,
+                "username": item.get("username", ""),
+                "ip": item.get("ip", ""),
+                "is_host": bool(item.get("is_host")),
+            }
+        with self._peers_lock:
+            self._peers = peers
+        if self.on_roster:
+            try:
+                self.on_roster(list(peers.values()))
+            except Exception as e:
+                warn(f"RoomSession.on_roster 回调异常: {e}")

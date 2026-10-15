@@ -24,7 +24,9 @@ from utils.helpers import format_size
 from utils.logger import info, warn, error
 from ui.about_page import APP_VERSION
 
-TREE_COLUMNS = ["名称", "大小", "占比", "项目数"]
+# 「占用」而非「大小」：索引按磁盘实际分配块统计（与访达「占用空间」、
+# du、资源管理器「磁盘上的大小」同口径），不是文件表观大小。
+TREE_COLUMNS = ["名称", "占用", "占比", "项目数"]
 
 # 等待扫描线程退出的最长时间 (毫秒)。扫描线程会持续向 SQLite 写入,
 # 未确认其退出前绝不能断开信号、释放引用或关闭数据库连接。
@@ -70,7 +72,22 @@ def _format_speed(bytes_per_sec):
     return f"{bytes_per_sec:.0f} B/s"
 
 
+# Linux 上不需要单独列出的伪文件系统 / 容器层
+_LINUX_SKIP_FSTYPES = frozenset([
+    "squashfs", "tmpfs", "devtmpfs", "overlay", "proc", "sysfs",
+    "cgroup", "cgroup2", "autofs", "ramfs", "debugfs", "tracefs",
+    "fusectl", "mqueue", "bpf", "configfs", "pstore", "securityfs",
+    "hugetlbfs", "efivarfs", "binfmt_misc", "nsfs",
+])
+
+
 def _get_available_drives():
+    """列出可扫描的驱动器 / 挂载点（Windows / macOS / Linux 三平台）。
+
+    Linux 分支原先直接 ``return ["/"]``，外接硬盘和独立挂载的分区在界面上
+    完全看不到，用户只能扫根分区。改用 ``psutil.disk_partitions()`` 枚举真实
+    挂载点，并过滤掉 snap / tmpfs / overlay 这类伪文件系统。
+    """
     drives = []
     if sys.platform == "win32":
         try:
@@ -102,6 +119,20 @@ def _get_available_drives():
             pass
     else:
         drives.append("/")
+        try:
+            import psutil
+            for part in psutil.disk_partitions(all=False):
+                mountpoint = part.mountpoint
+                if not mountpoint or mountpoint == "/":
+                    continue
+                if (part.fstype or "").lower() in _LINUX_SKIP_FSTYPES:
+                    continue
+                if mountpoint.startswith(("/snap/", "/var/snap/", "/run/", "/sys/")):
+                    continue
+                if os.path.isdir(mountpoint) and mountpoint not in drives:
+                    drives.append(mountpoint)
+        except Exception as e:
+            warn(f"_get_available_drives: 枚举 Linux 挂载点失败，仅扫描根目录: {e}")
     return drives
 
 
@@ -756,7 +787,7 @@ class SpaceIndexPage(QWidget):
         except OSError:
             mtime_str = ""
 
-        parts = [f"{icon} {name}", f"大小: {size}"]
+        parts = [f"{icon} {name}", f"占用: {size}"]
         if type_str:
             parts.append(f"类型: {type_str}")
         if items_str:

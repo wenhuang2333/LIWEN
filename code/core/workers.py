@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 import traceback
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -190,6 +191,7 @@ class PingWorker(QThread):
 class RoomHostWorker(QThread):
     status = pyqtSignal(str)
     error = pyqtSignal(str)
+    roster_updated = pyqtSignal(list)
 
     def __init__(self, room_info: dict, username: str = ""):
         super().__init__()
@@ -206,7 +208,18 @@ class RoomHostWorker(QThread):
             self._host = RoomHost(self._room_info, self._username)
             self._host.start()
             self.status.emit("房间广播已启动")
+            # 房主自己的界面也需要成员名单：名单的唯一来源就是 RoomHost，
+            # 之前没人把它取出来，于是房主一侧的"在线玩家"永远只有自己。
+            last_roster = None
             while not self._cancel:
+                try:
+                    roster = self._host.build_roster()
+                except Exception as e:
+                    warn(f"RoomHostWorker 读取成员名单失败: {e}")
+                    roster = None
+                if roster is not None and roster != last_roster:
+                    last_roster = roster
+                    self.roster_updated.emit(roster)
                 self.msleep(500)
         except Exception as e:
             self.error.emit(str(e))
@@ -236,12 +249,15 @@ class RoomJoinWorker(QThread):
     finished = pyqtSignal(bool, str, dict)
     error = pyqtSignal(str)
 
-    def __init__(self, host_ip: str, port: int, room_id: str, password: str = ""):
+    def __init__(self, host_ip: str, port: int, room_id: str, password: str = "",
+                 username: str = "", peer_id: str = ""):
         super().__init__()
         self._host_ip = host_ip
         self._port = port
         self._room_id = room_id
         self._password = password
+        self._username = username
+        self._peer_id = peer_id
         self._cancel = False
 
     def cancel(self):
@@ -251,11 +267,60 @@ class RoomJoinWorker(QThread):
         try:
             from network.room_protocol import RoomJoinClient
             ok, msg, config = RoomJoinClient.join_room(
-                self._host_ip, self._port, self._room_id, self._password)
+                self._host_ip, self._port, self._room_id, self._password,
+                username=self._username, peer_id=self._peer_id)
             self.finished.emit(ok, msg, config)
         except Exception as e:
             self.error.emit(str(e))
             self.finished.emit(False, str(e), {})
+
+
+class RoomSessionWorker(QThread):
+    """房间会话：周期心跳保活 + 接收房主下发的成员名单。
+
+    之前 ``RoomSession`` 写好了却**从来没有被实例化过**，于是加入房间的客户端
+    从不发心跳 —— 房主在 HEARTBEAT_TIMEOUT(10s) 后把成员全部剔除，"在线玩家"
+    永远只剩房主一个；同时客户端也拿不到任何成员信息，语音和文件传输都没有
+    目标。这个 worker 把那条断掉的链路接上。
+    """
+
+    roster_updated = pyqtSignal(list)
+    session_lost = pyqtSignal()
+    status = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, room_config: dict, username: str = ""):
+        super().__init__()
+        self._room_config = dict(room_config)
+        self._username = username
+        self._session = None
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        try:
+            from network.room_protocol import RoomSession
+            self._session = RoomSession(self._room_config, self._username)
+            self._session.on_roster = self.roster_updated.emit
+            self._session.on_session_lost = self.session_lost.emit
+            self._session.start_heartbeat()
+            self.status.emit("房间会话已建立")
+            while not self._cancel:
+                self.msleep(200)
+        except Exception as e:
+            tb = traceback.format_exc()
+            error(f"RoomSessionWorker.run 异常: {e}\n{tb}")
+            self.error.emit(str(e))
+        finally:
+            session = self._session
+            if session is not None:
+                try:
+                    session.stop()
+                except Exception as e:
+                    warn(f"RoomSessionWorker 停止会话异常: {e}")
+            self._session = None
 
 
 class VoiceWorker(QThread):
@@ -268,15 +333,39 @@ class VoiceWorker(QThread):
         self._sender_id = sender_id
         self._voice_port = voice_port
         self._cancel = False
+        self._client = None
+        self._peers: list[str] = []
+        self._peers_lock = threading.Lock()
 
     def cancel(self):
         self._cancel = True
+
+    def set_peers(self, peer_ips):
+        """更新语音发送目标（房间成员的真实局域网 IP）。
+
+        房间内语音原本**永远发不出去**：``VoiceClient.set_peers()`` 一直存在，
+        但 ``VoiceWorker`` 没有把它暴露出来，界面上也没有任何地方调用 —— 麦克风
+        采到的音频被发往一个空列表。语音线程可能还没起来，所以先存下来，等
+        ``run()`` 里客户端创建成功后再补一次。
+        """
+        with self._peers_lock:
+            self._peers = list(peer_ips)
+        client = self._client
+        if client is not None:
+            try:
+                client.set_peers(list(self._peers))
+            except Exception as e:
+                warn(f"VoiceWorker.set_peers 异常: {e}")
 
     def run(self):
         ok = False
         try:
             from network.voice_protocol import VoiceClient
             self._client = VoiceClient(self._sender_id, self._voice_port)
+            with self._peers_lock:
+                peers = list(self._peers)
+            if peers:
+                self._client.set_peers(peers)
             if self._client.start():
                 self.status.emit("语音已连接")
                 ok = True

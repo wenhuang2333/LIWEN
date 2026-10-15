@@ -35,10 +35,13 @@ from utils.constants import (  # noqa: E402
     APP_AUTHOR as APP_PUBLISHER,
     APP_EMAIL,
     APP_NAME_SLUG,
+    APP_INSTALL_SLUG,
     LEGACY_APP_SLUG,
 )
+# 安装目录名固定为 LIWEN（不带空格、不带 "Tool"）：路径无需加引号，也不会
+# 与 onedir 产物名 LIWENTool 混淆。名称同样来自 constants.py 单一来源。
 DEFAULT_INSTALL_DIR = os.path.join(
-    os.environ.get("ProgramFiles", "C:\\Program Files"), APP_NAME)
+    os.environ.get("ProgramFiles", "C:\\Program Files"), APP_INSTALL_SLUG)
 
 # Detect if running from PyInstaller bundle
 if getattr(sys, "frozen", False):
@@ -352,7 +355,7 @@ class PathPage(QWizardPage):
     def _browse(self):
         folder = QFileDialog.getExistingDirectory(self, "选择安装目录")
         if folder:
-            self._path_edit.setText(os.path.join(folder, APP_NAME))
+            self._path_edit.setText(os.path.join(folder, APP_INSTALL_SLUG))
 
     def install_path(self) -> str:
         return self._path_edit.text().strip()

@@ -14,7 +14,7 @@ from utils.helpers import format_size
 class FileListModel(QAbstractTableModel):
     """Flat table model showing children of a single directory."""
 
-    COLUMNS = ["名称", "大小", "占比", "项目数", "创建时间"]
+    COLUMNS = ["名称", "占用", "占比", "项目数", "创建时间"]
 
     def __init__(self, db, parent=None):
         super().__init__(parent)
