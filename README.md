@@ -1,11 +1,11 @@
 # 帽兜工具 · LIWEN Tool
 
-一款集 **文件压缩/解压、局域网文件传输、局域网联机大厅、VPN 隧道联机、可视化网页爬虫、
-HTTP 请求发送、AI 对话、磁盘空间分析、故障检测与修复** 于一体的跨平台桌面工具。
+一款集 **文件压缩/解压、局域网文件传输、局域网联机大厅、可视化网页爬虫、
+HTTP 请求发送、反向代理、AI 对话、磁盘空间分析、故障检测与修复** 于一体的跨平台桌面工具。
 
 界面基于 PyQt6，采用 Catppuccin Mocha 暗色主题；CLI 与 GUI 共用同一套核心逻辑。
 
-**当前版本：4.17.0**
+**当前版本：4.19.0**
 
 ---
 
@@ -15,13 +15,39 @@ HTTP 请求发送、AI 对话、磁盘空间分析、故障检测与修复** 于
 |---|---|
 | **压缩 / 解压** | ZIP / 7z / TAR / TAR.GZ / TAR.BZ2 / TAR.XZ / SHISHAN / ZHANS；0–10 级专有压缩刻度；AES 加密；7z 分卷；归档内容预览与选择性提取 |
 | **局域网传输** | TCP 直传，自动压缩后发送、接收端自动解压；设备发现（UDP 广播）；请求确认 / 自动接收 |
-| **联机大厅** | 房间创建与发现、挑战-应答口令认证、实时成员名单、实时语音（UDP，22050 Hz 单声道）、**房间内文件互传（全部成员 / 指定成员）** |
-| **VPN 隧道** | 基于 TUN 虚拟网卡组建虚拟局域网（10.99.0.0/16），依赖可选 Rust 核心 `lan_vpn` + `wintun.dll`（仅 Windows） |
+| **联机大厅** | 房间创建与发现、**IP:端口 直连加入**、挑战-应答口令认证、实时成员名单、实时语音（UDP，22050 Hz 单声道）、**房间内文件互传（全部成员 / 指定成员）** |
 | **网页爬虫** | 内嵌 Chromium 可视化拾取元素、CSS/XPath 规则、分页、反爬选项、站点可行性检测、导出 |
 | **HTTP 请求** | Postman 风格，支持全部方法、Params/Headers/Body（5 种）、响应头与 Cookie |
+| **反向代理** | 规则化反向代理：本机入口 → 固定上游，支持路径剥离/追加、Host 与 XFF 改写、Location 回写、WebSocket 隧道、上游 HTTPS 与入口 TLS 终止、热增删规则、访问日志与统计（**不做 MITM 解密**） |
 | **AI 对话** | OpenAI 兼容多provider，流式回复，自定义模型 |
 | **空间索引** | 扫描磁盘建立 SQLite 索引，树形浏览 + 占比条形图，快速定位大文件；按**实际占用空间**统计（与访达 / `du` 同口径），跨平台挂载点 |
 | **故障检测** | 网络 / 压缩 / 配置 / 索引 / AI 多项自检，一键修复，或交给独立修复程序 |
+
+### 反向代理是干什么的
+
+客户端里的域名 / 端口写死在代码里、又不方便改的时候（只能装真机的 App、第三方回调），
+建一条规则就能把「本机某个端口」整体转到「预先配置的上游」：
+
+```bash
+# 127.0.0.1:8888 → https://api.example.com，并剥掉 /api 前缀
+python code/main.py proxy-add --name 联调 --listen 127.0.0.1:8888 \
+    --target https://api.example.com --strip /api
+python code/main.py proxy-serve --name 联调      # 前台运行，Ctrl+C 停止
+```
+
+它是**有规则的**反向代理，不是开放代理：`CONNECT` 只能打到该规则配置的上游（其余 403），
+只支持 HTTP/1.1，也不做 HTTPS 中间人解密（那需要往客户端装根证书）。
+
+### 联机是怎么组网的
+
+联机是**纯应用层组网**：不创建虚拟网卡、不加载 TUN 驱动、不需要管理员权限，
+也不会被 UAC 或杀毒软件拦截。协议层（UDP 广播发现 + TCP 挑战-应答加入 + 3 秒心跳名单）
+天生跨平台，**Windows / macOS / Linux 混连使用同一套代码**。
+
+| 场景 | 方式 |
+|---|---|
+| 同一局域网（同一路由器 / WiFi / 热点） | 「搜索房间」自动发现，选中后加入 |
+| 跨网段、AP 隔离、广播被防火墙拦截 | 「直连加入」填对方 **IP + 通信端口**（走 TCP，不依赖广播） |
 
 ---
 
@@ -39,6 +65,12 @@ python code/main.py --help
 python code/main.py compress ./some_dir -o out.7z -f 7z -l 0
 python code/main.py decompress out.7z -d ./restored
 python code/main.py preview out.7z
+
+# 4. 命令行联机（跨平台，可混连）
+python code/main.py room-create -n 我的房间 -p 12345        # 开房（Ctrl+C 关闭）
+python code/main.py room-scan                               # 广播搜索房间
+python code/main.py room-probe -H 192.168.1.20 -p 12345     # 直连探测房间
+python code/main.py room-join  -H 192.168.1.20 -p 12345     # 直连加入（自动探测 room_id）
 ```
 
 > 入口必须在 `code/` 内执行，即从项目根目录运行 `python code/main.py`。
@@ -54,13 +86,6 @@ python code/build.py tarball     # Linux 便携包
 python code/build.py clean       # 清理构建产物
 ```
 
-Windows 构建会自动校验并打包 `wintun.dll`；若源码运行时缺少该驱动，可执行：
-
-```bash
-python code/tools/fetch_wintun.py          # 自动获取（带 SHA-256 校验）
-python code/tools/fetch_wintun.py --check  # 只校验
-```
-
 ---
 
 ## 目录结构
@@ -72,7 +97,6 @@ LIWEN/
 ├── obj/               # 文档
 ├── data/              # 运行时数据（日志、空间索引），自动生成，可整体删除
 ├── dist/  build/      # 构建产物
-├── wintun.dll         # Windows TUN 驱动（VPN 隧道必需）
 ├── requirements.txt
 └── CLAUDE.md          # 面向 AI 助手的工程说明
 ```
@@ -96,10 +120,14 @@ LIWEN/
 |---|---|---|
 | 文件传输 | 12345 | TCP |
 | 设备发现广播 | 12346 | UDP |
-| 房间公告 / 加入房间 | 12347 | UDP / TCP |
+| 房间公告 / 房间发现 | 12347 | UDP |
+| 房间加入服务 | 房间端口 + 1（如 12346） | TCP |
 | 房间语音 | 12400–12799（由房间端口推导） | UDP |
 | 房间内文件传输 | 12800–13199（由房间端口推导） | TCP |
 | 本地 Mock API（开发用） | 8700 | HTTP |
+
+> 房间端口合法范围 1024–65534（加入服务使用「端口 + 1」，65535+1 会越界）。
+> 语音端口与房间数据端口一律由 `utils.constants` 推导，不要手写 `room_port + N`。
 
 ---
 
@@ -109,13 +137,17 @@ LIWEN/
 2. `TAR.XZ` 与 `SHISHAN` 仅支持解压。
 3. TAR 系列不支持密码；仅 ZIP / 7z / SHISHAN / ZHANS 支持。
 4. 分卷压缩仅 7z 支持（产物为 `<名称>.7z.001`、`.002` …）。
-5. VPN 隧道仅 Windows，需 `lan_vpn` 核心 + `wintun.dll` + 管理员权限。
-6. 空间索引缓存可能较大，建议定期清理或在故障检测页重置。
+5. 联机本身不需要管理员权限；**仅右键菜单注册**（`code/installer/right_menu.py`）需要。
+6. 房间语音需要音频后端（`sounddevice`，已列入 `requirements.txt`）；缺失时语音按钮禁用并给出安装提示，
+   房间的成员名单与文件传输不受影响。
+7. 空间索引缓存可能较大，建议定期清理或在故障检测页重置。
 
 ---
 
 ## 第三方组件
 
-- [wintun.dll](https://www.wintun.net/) — WireGuard LLC 发布的 Windows TUN 驱动，
-  MIT / Apache-2.0 双许可。仓库内为官方 `wintun-0.14.1` 原版文件，未经修改
-  （SHA-256 `e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce`）。
+- [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) — GUI 框架（GPLv3 / 商业双授权）
+- [sounddevice](https://python-sounddevice.readthedocs.io/) — PortAudio 的 Python 绑定，房间语音的推荐后端
+  （MIT；wheel 覆盖 macOS / Windows / Linux，跨平台可用）
+- [py7zr](https://pypi.org/project/py7zr/)、[pyzipper](https://pypi.org/project/pyzipper/)、
+  [pycryptodome](https://www.pycryptodome.org/) — 压缩与加密

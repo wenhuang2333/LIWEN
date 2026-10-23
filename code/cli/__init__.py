@@ -11,12 +11,12 @@ from typing import Optional
 
 from cli.commands import (
     compress, transfer, room, crawler,
-    http_cmd, ai_cmd, space, diagnostic, settings_cmd,
+    http_cmd, ai_cmd, space, diagnostic, settings_cmd, proxy,
 )
 
 COMMAND_MODULES = [
     compress, transfer, room, crawler,
-    http_cmd, ai_cmd, space, diagnostic, settings_cmd,
+    http_cmd, ai_cmd, space, diagnostic, settings_cmd, proxy,
 ]
 
 
@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     from utils.constants import APP_NAME_SLUG
     parser = argparse.ArgumentParser(
         prog=APP_NAME_SLUG,
-        description="帽兜工具 (LIWEN Tool) CLI — 文件压缩/传输/爬虫/HTTP请求/AI/空间分析",
+        description="帽兜工具 (LIWEN Tool) CLI — 文件压缩/传输/爬虫/HTTP请求/反向代理/AI/空间分析",
     )
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
 

@@ -18,6 +18,7 @@ from ui.about_page import AboutPage
 from ui.diagnostic_page import DiagnosticPage
 from ui.space_index_page import SpaceIndexPage
 from ui.http_request_page import HttpRequestPage
+from ui.reverse_proxy_page import ReverseProxyPage
 from ui.ai_page import AiPage
 from ui.archive_preview_dialog import ArchivePreviewDialog
 from core.workers import CompressWorker, DecompressWorker, SendWorker, ReceiveWorker, PingWorker
@@ -244,6 +245,7 @@ class MainWindow(QMainWindow):
         self.diagnostic_page = DiagnosticPage()
         self.space_index_page = SpaceIndexPage()
         self.http_request_page = HttpRequestPage()
+        self.reverse_proxy_page = ReverseProxyPage()
         self.ai_page = AiPage()
 
         # Main stack — 5 category pages
@@ -260,10 +262,11 @@ class MainWindow(QMainWindow):
             1, ["局域网传输", "联机大厅"],
             [self.lan_page, self.room_lobby_page]))
 
-        # Cat 2: 互联网 — sub-tabs: 网页爬虫, 请求发送, 生成式AI
+        # Cat 2: 互联网 — sub-tabs: 网页爬虫, 请求发送, 生成式AI, 反向代理
         self.main_stack.addWidget(self._make_category_with_sub_tabs(
-            2, ["网页爬虫", "请求发送", "生成式AI"],
-            [self.crawler_page, self.http_request_page, self.ai_page]))
+            2, ["网页爬虫", "请求发送", "生成式AI", "反向代理"],
+            [self.crawler_page, self.http_request_page, self.ai_page,
+             self.reverse_proxy_page]))
 
         # Cat 3: 设置 — sub-tabs: 设置, 故障检测
         self.main_stack.addWidget(self._make_category_with_sub_tabs(
@@ -740,6 +743,7 @@ class MainWindow(QMainWindow):
                         self.room_lobby_page.cleanup,
                         self.crawler_page.cleanup,
                         self.http_request_page.cleanup,
+                        self.reverse_proxy_page.cleanup,
                         self.diagnostic_page.cleanup,
                         self.space_index_page.cleanup,
                         self.ai_page.cleanup):

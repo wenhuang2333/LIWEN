@@ -21,6 +21,8 @@ MSG_ROOM_JOIN_CHALLENGE = "room_join_chal"
 MSG_ROOM_JOIN_RESPONSE = "room_join_resp"
 MSG_ROOM_JOIN_ACCEPT = "room_join_accept"
 MSG_ROOM_JOIN_REJECT = "room_join_reject"
+# 直连探测：按 IP:端口 询问主机"你是谁"，用于 UDP 广播不可达时手动加入
+MSG_ROOM_PROBE = "room_probe"
 MSG_HEARTBEAT = "heartbeat"
 MSG_HEARTBEAT_ACK = "heartbeat_ack"
 # 房主下发的成员名单（随心跳回包携带）
@@ -31,7 +33,9 @@ HEARTBEAT_INTERVAL = 3      # seconds between heartbeats
 HEARTBEAT_TIMEOUT = 10      # seconds before peer is considered disconnected
 
 # Voice call over LAN (UDP)
-VOICE_PORT_OFFSET = 2        # voice port = room_port + VOICE_PORT_OFFSET
+# 注意：语音端口**不是** ``room_port + N``，必须用下面的
+# ``voice_port_for_room()`` 推导（旧的 ``VOICE_PORT_OFFSET = 2`` 会在默认端口下
+# 撞上房间发现端口 12347，已删除，不要重新引入）。
 VOICE_SAMPLE_RATE = 22050    # Hz
 VOICE_CHUNK_MS = 20          # ms per audio frame
 VOICE_CHANNELS = 1           # mono
@@ -123,7 +127,7 @@ VOLUME_SUFFIX_PATTERNS = [".7z.001", ".zip.001", ".part01.rar", ".r01"]
 # 可执行文件/构建产物/目录名去掉空格，避免命令行与路径必须加引号。
 APP_NAME_ZH = "帽兜工具"
 APP_NAME_EN = "LIWEN Tool"
-APP_VERSION = "4.17.0"
+APP_VERSION = "4.19.0"
 APP_VENDOR_SLUG = "ShiShangYue"      # ASCII 厂商标识，用于 AppUserModelID / Bundle ID
 APP_AUTHOR = "十山月"
 APP_EMAIL = "1275679733@qq.com"
