@@ -77,6 +77,14 @@ def check(name, cond, detail=""):
     return bool(cond)
 
 
+def _rejects(payload) -> bool:
+    try:
+        normalize_rule(payload)
+        return False
+    except RuleError:
+        return True
+
+
 def section(title):
     print(f"\n── {title} " + "─" * max(0, 60 - len(title)))
 
@@ -856,8 +864,164 @@ def main() -> int:
             handle.write("{ 这不是 JSON")
         check("整文件损坏 → 空列表不抛异常", ProxyRuleStore(store_path).all() == [])
 
-        # ── 15. 架构约束 ──
-        section("15. 架构约束（核心层不依赖 Qt / requests）")
+        # ── 16. 同一端口的 Host 路由 ──
+        section("16. 同一监听端口按 Host 分发（多域名共用一个入口）")
+        up_b, up_b_port, up_b_url = start_upstream()
+        try:
+            shared_port = free_port()
+            route_a = normalize_rule({"name": "兜底", "listen_port": shared_port,
+                                      "upstream": up_url})
+            route_b = normalize_rule({"name": "api", "listen_port": shared_port,
+                                      "upstream": up_b_url, "match_host": "api.example.com"})
+            router = ReverseProxyServer(rules=[route_a])
+            servers.append(router)
+            router.start()
+            added = router.add_rule(route_b)
+            check("同端口第二条规则热添加（复用监听器）",
+                  len(added["started"]) == 1 and added["started"][0]["shared"] is True,
+                  str(added))
+            check("listeners() 报告同端口两条规则",
+                  len(router.listeners()) == 2
+                  and {i["listen_port"] for i in router.listeners()} == {shared_port},
+                  str(router.listeners()))
+
+            _, _, info = echo_info(shared_port, "/echo", headers={"Host": "api.example.com"})
+            check("Host 命中 match_host → 走该规则的上游",
+                  info["headers"]["host"] == f"127.0.0.1:{up_b_port}",
+                  str(info["headers"].get("host")))
+            _, _, info = echo_info(shared_port, "/echo", headers={"Host": "other.example.com"})
+            check("Host 未命中 → 回落到兜底规则",
+                  info["headers"]["host"] == f"127.0.0.1:{up_port}",
+                  str(info["headers"].get("host")))
+            _, _, info = echo_info(shared_port, "/echo", headers={"Host": "API.Example.COM:9999"})
+            check("Host 匹配忽略大小写与端口",
+                  info["headers"]["host"] == f"127.0.0.1:{up_b_port}",
+                  str(info["headers"].get("host")))
+
+            # 通配与最长匹配
+            wild = ReverseProxyServer(rules=[
+                normalize_rule({"name": "wild", "listen_port": free_port(), "upstream": up_url}),
+            ])
+            servers.append(wild)
+            wild.start()
+            wild_port = wild.listeners()[0]["listen_port"]
+            wild.add_rule(normalize_rule({"name": "w1", "listen_port": wild_port,
+                                          "upstream": up_b_url, "match_host": "*.example.com"}))
+            wild.add_rule(normalize_rule({"name": "w2", "listen_port": wild_port,
+                                          "upstream": up_url, "match_host": "*.api.example.com"}))
+            _, _, info = echo_info(wild_port, "/echo", headers={"Host": "v1.example.com"})
+            check("通配 *.example.com 命中一级子域",
+                  info["headers"]["host"] == f"127.0.0.1:{up_b_port}",
+                  str(info["headers"].get("host")))
+            _, _, info = echo_info(wild_port, "/echo", headers={"Host": "v1.api.example.com"})
+            check("通配取最长匹配（*.api.example.com 优先）",
+                  info["headers"]["host"] == f"127.0.0.1:{up_port}",
+                  str(info["headers"].get("host")))
+            _, _, info = echo_info(wild_port, "/echo", headers={"Host": "a.b.example.com"})
+            check("通配只吃一级标签（a.b.example.com 回落兜底）",
+                  info["headers"]["host"] == f"127.0.0.1:{up_port}",
+                  str(info["headers"].get("host")))
+
+            # 没有兜底规则时未命中 → 404
+            only_port = free_port()
+            only_match = ReverseProxyServer(rules=[normalize_rule(
+                {"name": "only-a", "listen_port": only_port, "upstream": up_url,
+                 "match_host": "a.example.com"})])
+            servers.append(only_match)
+            only_match.start()
+            only_match.add_rule(normalize_rule(
+                {"name": "only-b", "listen_port": only_port, "upstream": up_b_url,
+                 "match_host": "b.example.com"}))
+            status, _, _ = request(only_port, "GET", "/echo",
+                                   headers={"Host": "nope.example.com"})
+            check("无兜底规则且 Host 未命中 → 404", status == 404, f"status={status}")
+
+            # 热移除命中规则后回落到兜底，监听器仍在
+            check("热移除同端口的一条规则", router.remove_rule(route_b["id"]) is True)
+            _, _, info = echo_info(shared_port, "/echo", headers={"Host": "api.example.com"})
+            check("移除后 Host 回落兜底且端口仍可用",
+                  info["headers"]["host"] == f"127.0.0.1:{up_port}",
+                  str(info["headers"].get("host")))
+
+            # CONNECT 按 authority 选规则：指向兜底上游可用，指向另一条规则的上游被拒
+            sock = socket.create_connection(("127.0.0.1", shared_port), timeout=10)
+            try:
+                sock.sendall(f"CONNECT 127.0.0.1:{up_port} HTTP/1.1\r\n"
+                             f"Host: 127.0.0.1:{up_port}\r\n\r\n".encode())
+                head = sock.recv(200)
+            finally:
+                sock.close()
+            check("CONNECT 命中兜底上游 → 200", b"200 Connection Established" in head,
+                  repr(head[:60]))
+
+            # 冲突校验：同端口两条兜底规则 / 重复 match_host / 证书不一致
+            def start_conflict(rules):
+                probe = ReverseProxyServer(rules=rules)
+                try:
+                    probe.start()
+                    probe.stop()
+                    return ""
+                except ProxyStartError as exc:
+                    probe.stop()
+                    return str(exc)
+
+            rules_port = free_port()
+            reason = start_conflict([
+                {"name": "a", "listen_port": rules_port, "upstream": up_url},
+                {"name": "b", "listen_port": rules_port, "upstream": up_url}])
+            check("同端口两条兜底规则被拒绝", "兜底" in reason, reason)
+
+            rules_port = free_port()
+            reason = start_conflict([
+                {"name": "a", "listen_port": rules_port, "upstream": up_url,
+                 "match_host": "x.example.com"},
+                {"name": "b", "listen_port": rules_port, "upstream": up_url,
+                 "match_host": "X.Example.com"}])
+            check("同端口重复 match_host 被拒绝", "占用" in reason, reason)
+
+            if openssl_available():
+                cert_a = os.path.join(tmpdir, "shared-a.crt")
+                key_a = os.path.join(tmpdir, "shared-a.key")
+                cert_b = os.path.join(tmpdir, "shared-b.crt")
+                key_b = os.path.join(tmpdir, "shared-b.key")
+                generate_self_signed_cert(cert_a, key_a, "a.local")
+                generate_self_signed_cert(cert_b, key_b, "b.local")
+                rules_port = free_port()
+                reason = start_conflict([
+                    {"name": "a", "listen_port": rules_port, "upstream": up_url,
+                     "match_host": "a.example.com", "tls_cert": cert_a, "tls_key": key_a},
+                    {"name": "b", "listen_port": rules_port, "upstream": up_url,
+                     "match_host": "b.example.com", "tls_cert": cert_b, "tls_key": key_b}])
+                check("同端口证书不一致被拒绝", "证书" in reason, reason)
+
+            # 无归属 404 也要进访问日志（rule_id="" ），并且 stats() 的 listening 判据正确
+            status, _, _ = request(only_port, "GET", "/echo",
+                                   headers={"Host": "nope.example.com"})
+            events = only_match.drain_events(200)
+            unmatched = [e for e in events if e.get("status") == 404]
+            check("无匹配 Host 的 404 记入访问日志（rule_id 为空）",
+                  bool(unmatched) and unmatched[-1].get("rule_id") == ""
+                  and "没有匹配 Host" in (unmatched[-1].get("error") or ""),
+                  str(unmatched[-1:]))
+            check("stats() 总请求数计入无归属 404",
+                  only_match.stats()["requests"] >= 1
+                  and only_match.stats()["errors"] >= 1,
+                  str({k: only_match.stats()[k] for k in ("requests", "errors")}))
+            listening = {r["rule_id"]: r["listening"] for r in router.stats()["rules"]}
+            check("stats() 逐规则 listening 与真实监听状态一致",
+                  listening.get(route_a["id"]) is True,
+                  str(listening))
+
+            check("match_host 非法域名被拒绝",
+                  _rejects({"upstream": up_url, "match_host": "http://x/y"})
+                  and _rejects({"upstream": up_url, "match_host": "bad host"}),
+                  "含协议/空格应报错")
+        finally:
+            up_b.shutdown()
+            up_b.server_close()
+
+        # ── 17. 架构约束 ──
+        section("17. 架构约束（核心层不依赖 Qt / requests）")
         import network.reverse_proxy as module
         source = open(module.__file__, encoding="utf-8").read()
         check("核心模块不 import PyQt6", "PyQt" not in source)

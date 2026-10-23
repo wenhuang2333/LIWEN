@@ -6,6 +6,9 @@
     界面**不复制**一份代理实现，也不静默补默认值放行）。
   * 持久化：``utils.proxy_store.proxy_rule_store``（底层走 ``utils.jsonstore`` 原子写入）。
   * 代理内核：``network.reverse_proxy.ReverseProxyServer``（纯标准库、无 Qt）。
+  * 同一监听端口可挂多条规则，按请求 ``Host`` 分发（精确 → 最长 ``*.`` 通配 → 兜底），
+    组合约束（至多一条兜底 / ``match_host`` 不重复 / 同端口证书一致）由核心
+    ``validate_groups()`` 裁决；本页在保存后提前提示，启动失败时如实显示中文原因。
   * 启停放在页面内 ``QThread`` 上执行（不阻塞 GUI 线程），日志用 ``QTimer`` 轮询
     ``drain_events()`` 刷新，``cleanup()`` 幂等。
 
@@ -53,6 +56,7 @@ from network.reverse_proxy import (
     normalize_rule,
     openssl_available,
     rule_display,
+    validate_groups,
 )
 from utils.helpers import format_size
 from utils.logger import error as log_error
@@ -66,8 +70,10 @@ STATS_EVERY_TICKS = 3           # 每 3 个 tick（≈0.9s）刷新一次统计�
 MAX_LOG_ROWS = 2000             # 访问日志表上限（超出自动裁剪最旧行）
 STOP_TIMEOUT = 3.0              # ReverseProxyServer.stop() 的等待上限
 
-COL_ENABLED, COL_NAME, COL_LISTEN, COL_UPSTREAM, COL_TLS, COL_STATUS = range(6)
-RULE_HEADERS = ["启用", "名称", "监听地址", "上游目标", "TLS", "状态"]
+(COL_ENABLED, COL_NAME, COL_LISTEN, COL_MATCH, COL_UPSTREAM,
+ COL_TLS, COL_STATUS) = range(7)
+RULE_HEADERS = ["启用", "名称", "监听地址", "Host 匹配", "上游目标", "TLS", "状态"]
+MATCH_FALLBACK_TEXT = "*（兜底）"   # 同一端口上不限 Host 的那条规则（§19.4 第 12 条）
 
 LOG_HEADERS = ["时间", "规则", "方法", "路径", "状态", "耗时", "入", "出", "错误"]
 
@@ -393,6 +399,15 @@ class _RuleDialog(QDialog):
         self._host_header_edit.setPlaceholderText("留空 = 自动使用上游 host[:port]")
         self._host_header_edit.setStyleSheet(CSS_INPUT)
 
+        self._match_host_edit = QLineEdit()
+        self._match_host_edit.setPlaceholderText("api.example.com 或 *.example.com")
+        self._match_host_edit.setStyleSheet(CSS_INPUT)
+        self._match_host_hint = QLabel(
+            "同一端口可挂多条规则，按 Host 分发；留空表示该端口的兜底规则"
+        )
+        self._match_host_hint.setStyleSheet(CSS_HINT)
+        self._match_host_hint.setWordWrap(True)
+
         self._rewrite_location_check = QCheckBox("把响应 Location 里的上游 origin 改回入口 origin")
         self._rewrite_location_check.setChecked(True)
 
@@ -402,6 +417,8 @@ class _RuleDialog(QDialog):
         form.addRow("去掉前缀", self._strip_edit)
         form.addRow("追加前缀", self._add_prefix_edit)
         form.addRow("Host 头", self._host_header_edit)
+        form.addRow("Host 匹配（留空=兜底）", self._match_host_edit)
+        form.addRow("", self._match_host_hint)
         form.addRow("", self._rewrite_location_check)
         form.addRow("", self._verify_tls_check)
         root.addLayout(form)
@@ -483,6 +500,7 @@ class _RuleDialog(QDialog):
         self._strip_edit.setText(_as_text(rule.get("strip_prefix")))
         self._add_prefix_edit.setText(_as_text(rule.get("add_prefix")))
         self._host_header_edit.setText(_as_text(rule.get("host_header")))
+        self._match_host_edit.setText(_as_text(rule.get("match_host")))
         self._rewrite_location_check.setChecked(bool(rule.get("rewrite_location", True)))
         self._verify_tls_check.setChecked(bool(rule.get("verify_tls", True)))
         self._allow_connect_check.setChecked(bool(rule.get("allow_connect", True)))
@@ -520,6 +538,7 @@ class _RuleDialog(QDialog):
             "strip_prefix": self._strip_edit.text().strip(),
             "add_prefix": self._add_prefix_edit.text().strip(),
             "host_header": self._host_header_edit.text().strip(),
+            "match_host": self._match_host_edit.text().strip(),
             "rewrite_location": self._rewrite_location_check.isChecked(),
             "verify_tls": self._verify_tls_check.isChecked(),
             "allow_connect": self._allow_connect_check.isChecked(),
@@ -626,7 +645,10 @@ class ReverseProxyPage(QWidget):
         self._leaked = []                   # wait() 超时仍存活的线程，保引用不 terminate
         self._rules: list[dict] = []
         self._running_ids: set[str] = set()
+        self._shared_ids: set[str] = set()   # 与其它规则共用监听端口的规则（按 Host 分发）
         self._failed_rules: dict[str, str] = {}
+        self._group_warn_pending = False     # 组合冲突提示去重（避免一次操作弹两次）
+        self._cleaned = False                # cleanup() 之后，延迟回调不得再碰控件
         self._log_records: list[dict] = []   # 日志环形缓冲（过滤时按需重绘）
         self._tick = 0
         self._suppress_item_changed = False
@@ -704,11 +726,13 @@ class ReverseProxyPage(QWidget):
         header.setSectionResizeMode(COL_ENABLED, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(COL_LISTEN, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(COL_MATCH, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(COL_UPSTREAM, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(COL_TLS, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.Interactive)
         self._rules_table.setColumnWidth(COL_NAME, 170)
         self._rules_table.setColumnWidth(COL_LISTEN, 155)
+        self._rules_table.setColumnWidth(COL_MATCH, 165)
         self._rules_table.setColumnWidth(COL_STATUS, 260)
         self._rules_table.setStyleSheet(CSS_TABLE)
         self._rules_table.setMinimumHeight(160)
@@ -723,6 +747,8 @@ class ReverseProxyPage(QWidget):
         hint = QLabel(
             "仅支持 HTTP/1.1（上游 ALPN 固定 http/1.1，不支持 HTTP/2/HTTP/3）；"
             "不做 MITM 证书拦截，不解密第三方 TLS；CONNECT 只能连到该规则的上游（非开放代理）；"
+            "同一监听端口可挂多条规则并按 Host 分发（精确 → 最长 *. 通配 → 兜底，"
+            "多条 Host 规则都不命中时返回 404）；"
             "访问日志只记元数据（方法/路径/状态/耗时/字节数/错误），不落盘请求体。"
         )
         hint.setObjectName("pageHint")
@@ -840,7 +866,31 @@ class ReverseProxyPage(QWidget):
             log_error("ReverseProxyPage 保存规则失败: save() 返回 False")
             QMessageBox.warning(self, "保存失败", "规则保存失败（写入被拒绝），详见 data/log.txt。")
             return False
+        # 组合合法性（至多一条兜底 / match_host 不重复 / 同端口证书一致）核心要到启动
+        # 才校验；这里在保存后如实提前提示，避免用户点了「启动」才看到失败。不阻止保存。
+        if not self._group_warn_pending:
+            self._group_warn_pending = True
+            QTimer.singleShot(0, self._check_group_conflicts)
         return True
+
+    def _check_group_conflicts(self):
+        """保存后校验「同一监听端口上的多条规则」组合，冲突则给出核心的中文原因。"""
+        self._group_warn_pending = False
+        if self._cleaned:
+            return
+        enabled = [r for r in self._rules if isinstance(r, dict) and r.get("enabled", True)]
+        if len(enabled) < 2:
+            return
+        try:
+            validate_groups(enabled)
+        except (RuleError, ProxyError) as exc:
+            warn(f"ReverseProxyPage 规则组合冲突: {exc}")
+            QMessageBox.warning(
+                self, "规则组合冲突",
+                f"{exc}\n\n该组合在启动时会被拒绝，请修改后再启动。",
+            )
+        except Exception as exc:                     # noqa: BLE001
+            log_error(f"ReverseProxyPage 规则组合校验异常: {exc}")
 
     def _rule_by_id(self, rule_id: str):
         for rule in self._rules:
@@ -884,7 +934,17 @@ class ReverseProxyPage(QWidget):
                 table.setItem(row, COL_NAME, QTableWidgetItem(name))
 
                 listen = f"{_as_text(rule.get('listen_host'))}:{_as_int(rule.get('listen_port'))}"
-                table.setItem(row, COL_LISTEN, QTableWidgetItem(listen))
+                listen_item = QTableWidgetItem(listen)
+                table.setItem(row, COL_LISTEN, listen_item)
+
+                match = _as_text(rule.get("match_host"))
+                if match:
+                    match_item = QTableWidgetItem(match)
+                    match_item.setToolTip(f"仅分发 Host 为 {match} 的请求")
+                else:
+                    match_item = _muted_item(MATCH_FALLBACK_TEXT, C_MUTED)
+                    match_item.setToolTip("该端口的兜底规则：没有 Host 规则匹配的请求都走它")
+                table.setItem(row, COL_MATCH, match_item)
 
                 upstream = _as_text(rule.get("upstream"))
                 up_item = QTableWidgetItem(upstream)
@@ -933,6 +993,15 @@ class ReverseProxyPage(QWidget):
                     status_item.setText(text)
                 status_item.setForeground(QColor(color))
                 status_item.setToolTip(text)
+
+                listen_item = table.item(row, COL_LISTEN)
+                if listen_item is not None:
+                    tip = (
+                        "该端口上还挂着其它规则，按 Host 分发（精确 → 最长通配 → 兜底）"
+                        if rid in self._shared_ids else ""
+                    )
+                    if listen_item.toolTip() != tip:
+                        listen_item.setToolTip(tip)
         finally:
             self._suppress_item_changed = False
 
@@ -974,6 +1043,8 @@ class ReverseProxyPage(QWidget):
             QTimer.singleShot(0, lambda r=normalized: self._finish_toggle(r))
 
     def _finish_toggle(self, normalized: dict):
+        if self._cleaned:                    # 页面已清理，延迟回调不再触碰控件
+            return
         self._load_rules()
         self._refresh_rules_table()
         self._apply_rule_hot(normalized)
@@ -1099,6 +1170,7 @@ class ReverseProxyPage(QWidget):
         self._persist()
         self._failed_rules.pop(rule_id, None)
         self._running_ids.discard(rule_id)
+        self._shared_ids.discard(rule_id)
         self._load_rules()
         self._refresh_rules_table()
         info(f"ReverseProxyPage 删除规则 {rule_id}")
@@ -1278,6 +1350,7 @@ class ReverseProxyPage(QWidget):
                 rid = _as_text(data.get("rule_id"))
                 if rid:
                     self._running_ids.discard(rid)
+                    self._shared_ids.discard(rid)
             elif op == "add_rule":
                 payload = getattr(worker, "_payload", None)
                 payload_rule = payload.get("rule") if isinstance(payload, dict) else None
@@ -1412,6 +1485,7 @@ class ReverseProxyPage(QWidget):
         server = self._server
         if server is None:
             self._running_ids = set()
+            self._shared_ids = set()
             self._reset_stats_display()
             self._update_rule_statuses()
             self._update_status_label()
@@ -1431,6 +1505,12 @@ class ReverseProxyPage(QWidget):
             listeners = []
         running_ids = {rid for rid in (_rule_id_of(x) for x in (listeners or [])) if rid}
         self._running_ids = running_ids
+        shared = set()
+        for entry in (listeners or []):
+            rid = _rule_id_of(entry)
+            if rid and isinstance(entry, dict) and entry.get("shared"):
+                shared.add(rid)
+        self._shared_ids = shared
         self._update_rule_statuses()
         self._update_status_label()
 
@@ -1579,12 +1659,14 @@ class ReverseProxyPage(QWidget):
     def _update_status_label(self):
         running = self._server_running()
         failed = len(self._failed_rules)
+        first_reason = next(iter(self._failed_rules.values()), "")
         if self._worker is not None and self._server is None and not running:
             text, color = "正在启动…", C_WARN
         elif not running:
             text, color = "未运行", C_MUTED
             if failed:
-                text = f"部分失败：{failed} 条未启动"
+                # 全部失败时也要给出原因：否则用户只看到条数，得再点一次才知道为什么
+                text = f"部分失败：{failed} 条未启动" + (f"（{first_reason}）" if first_reason else "")
                 color = C_BAD
         elif failed:
             first = next(iter(self._failed_rules.values()))
@@ -1651,4 +1733,6 @@ class ReverseProxyPage(QWidget):
                         log_error(f"ReverseProxyPage.cleanup 兜底停止服务器也失败: {exc2}")
 
             self._running_ids = set()
+            self._shared_ids = set()
+            self._cleaned = True                 # 之后的延迟回调（singleShot）会自行退出
             info("ReverseProxyPage.cleanup")

@@ -27,6 +27,8 @@ def register(subparsers):
     p.add_argument("--strip", default="", help="剥离的入口路径前缀，如 /api")
     p.add_argument("--add", default="", dest="add_prefix", help="转发前追加的路径前缀")
     p.add_argument("--host", default="", dest="host_header", help="覆盖 Host 头")
+    p.add_argument("--match-host", default="", dest="match_host",
+                   help="按 Host 头分发（支持 *.example.com）；留空 = 该端口的兜底规则")
     p.add_argument("--insecure", action="store_true", help="不校验上游 TLS 证书")
     p.add_argument("--tls-cert", default="", help="入口 TLS 证书（PEM）")
     p.add_argument("--tls-key", default="", help="入口 TLS 私钥（PEM）")
@@ -52,6 +54,8 @@ def register(subparsers):
     p.add_argument("--strip", default="", help="剥离的入口路径前缀，如 /api")
     p.add_argument("--add", default="", dest="add_prefix", help="转发前追加的路径前缀")
     p.add_argument("--host", default="", dest="host_header", help="覆盖 Host 头")
+    p.add_argument("--match-host", default="", dest="match_host",
+                   help="按 Host 头分发（支持 *.example.com）；留空 = 该端口的兜底规则")
     p.add_argument("--tls-cert", default="", help="入口 TLS 证书（PEM）")
     p.add_argument("--tls-key", default="", help="入口 TLS 私钥（PEM）")
     p.add_argument("--header", action="append", default=[],
@@ -101,6 +105,7 @@ def _build_rule_from_args(args) -> dict:
         "strip_prefix": args.strip,
         "add_prefix": args.add_prefix,
         "host_header": getattr(args, "host_header", "") or getattr(args, "host", ""),
+        "match_host": getattr(args, "match_host", ""),
         "verify_tls": not args.insecure,
         "tls_cert": args.tls_cert,
         "tls_key": args.tls_key,
@@ -124,11 +129,12 @@ def _handle_list(args) -> int:
         print("（没有已保存的反向代理规则）")
         return 0
     from network.reverse_proxy import rule_display
-    print(f"{'id':<12} {'启用':<5} {'监听/上游'}")
+    print(f"{'id':<12} {'启用':<5} {'Host 匹配':<22} {'监听/上游'}")
     for rule in rules:
         flag = "是" if rule.get("enabled") else "否"
         name = rule.get("name") or "-"
-        print(f"{rule['id']:<12} {flag:<5} {rule_display(rule)}  [{name}]")
+        match = rule.get("match_host") or "*（兜底）"
+        print(f"{rule['id']:<12} {flag:<5} {match:<22} {rule_display(rule)}  [{name}]")
     return 0
 
 
@@ -181,11 +187,24 @@ def _resolve_serve_rules(args) -> list:
         return [_build_rule_from_args(args)]
     if getattr(args, "rule_id", "") or args.name:
         rules = proxy_rule_store.all()
+        rid = getattr(args, "rule_id", "")
+        chosen = None
         for rule in rules:
-            rid = getattr(args, "rule_id", "")
             if (rid and rule["id"] == rid) or (args.name and rule.get("name") == args.name):
-                return [rule]
-        raise ValueError(f"未找到规则（id={getattr(args, 'rule_id', '')!r} name={args.name!r}）")
+                chosen = rule
+                break
+        if chosen is None:
+            raise ValueError(f"未找到规则（id={rid!r} name={args.name!r}）")
+        # 同一监听端口上的其它启用规则一并拉起：它们共用一个监听器、按 Host 分发，
+        # 只启动其中一条会让其它域名的请求落到兜底或 404，与用户预期不符。
+        key = (chosen["listen_host"], chosen["listen_port"])
+        group = [chosen]
+        for rule in rules:
+            if rule["id"] == chosen["id"]:
+                continue
+            if (rule["listen_host"], rule["listen_port"]) == key and rule.get("enabled", True):
+                group.append(rule)
+        return group
     raise ValueError("需要 --listen/--target、--id/--name 或 --rule 之一")
 
 

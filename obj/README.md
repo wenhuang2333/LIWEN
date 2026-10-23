@@ -50,7 +50,7 @@
 |---|---|
 | `code/` | **全部源代码**（`ui/ core/ network/ utils/ cli/ installer/ tools/` + 3 个入口脚本） |
 | `static/` | 静态资源：应用图标、关于页头像、AI 对话头像 |
-| `code/tools/verify_reverse_proxy.py` / `fuzz_reverse_proxy.py` | 反向代理验证（100 项）与对抗（41 项）套件，自带上游测试服务器，不依赖外网 |
+| `code/tools/verify_reverse_proxy.py` / `fuzz_reverse_proxy.py` | 反向代理验证（119 项）与对抗（41 项）套件，自带上游测试服务器，不依赖外网 |
 | `obj/` | 本目录，文档 |
 | `data/` | 运行时数据：`log.txt`、空间索引缓存。**可整体删除**，程序会自动重建 |
 | `dist/` | 构建产物（PyInstaller 输出） |

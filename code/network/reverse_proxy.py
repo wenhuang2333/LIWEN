@@ -76,6 +76,9 @@ BODYLESS_STATUS = frozenset({204, 304})
 _TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _RULE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _HEX_RE = re.compile(r"^[0-9A-Fa-f]+$")
+#: match_host 允许的形态：单标签、域名、IPv4（不含协议/路径/端口）
+_HOST_RE = re.compile(
+    r"^[0-9a-z]([0-9a-z-]*[0-9a-z])?(\.[0-9a-z]([0-9a-z-]*[0-9a-z])?)*$")
 
 
 # ─────────────────────────────── 异常 ───────────────────────────────
@@ -116,6 +119,7 @@ RULE_DEFAULTS = {
     "enabled": True,
     "listen_host": DEFAULT_LISTEN_HOST,
     "listen_port": DEFAULT_LISTEN_PORT,
+    "match_host": "",
     "upstream": "",
     "strip_prefix": "",
     "add_prefix": "",
@@ -324,6 +328,19 @@ def normalize_rule(raw) -> dict:
         rule[field] = "" if value in ("", "/") else value.rstrip("/")
 
     rule["host_header"] = _clean_str(raw.get("host_header", ""), "host_header", max_len=253)
+
+    # match_host：按 Host 头分发（同一监听端口上可挂多条规则）
+    match = _clean_str(raw.get("match_host", ""), "match_host", max_len=253).strip().lower()
+    match = match.rstrip(".")
+    if match:
+        if "://" in match or "/" in match:
+            raise RuleError("match_host 只填域名，不含协议与路径")
+        if match.startswith("."):
+            raise RuleError("match_host 的通配请写成 *.example.com")
+        core = match[2:] if match.startswith("*.") else match
+        if not core or not _HOST_RE.match(core):
+            raise RuleError(f"match_host 不是合法域名: {match!r}")
+    rule["match_host"] = match
 
     for field, default in (("rewrite_location", True), ("verify_tls", True),
                            ("allow_connect", True)):
@@ -779,6 +796,49 @@ def _make_client_ssl_context(verify: bool) -> ssl.SSLContext:
     return ctx
 
 
+def _host_only(host_header: str) -> str:
+    """从 ``Host`` 头里取出小写主机名（去掉端口与 IPv6 方括号）。"""
+    text = (host_header or "").strip().lower()
+    if not text:
+        return ""
+    if text.startswith("["):                      # [::1]:8080
+        end = text.find("]")
+        return text[1:end] if end > 0 else text
+    if text.count(":") == 1:                      # host:port
+        return text.split(":", 1)[0]
+    return text
+
+
+def validate_groups(rules) -> None:
+    """校验「同一监听端口上的多条规则」这一组合是否合法。
+
+    同一端口可以挂多条规则（按 Host 分发），但必须满足：
+    至多一条不限 Host 的兜底规则；``match_host`` 互不重复；证书配置一致。
+    """
+    groups = {}
+    for rule in rules:
+        groups.setdefault((rule["listen_host"], rule["listen_port"]), []).append(rule)
+    for (host, port), group in groups.items():
+        seen = {}
+        for rule in group:
+            key = rule.get("match_host") or ""
+            if key in seen:
+                other = seen[key]
+                label = other.get("name") or other["id"]
+                if key:
+                    raise RuleError(
+                        f"{host}:{port} 上 match_host={key} 已被规则「{label}」占用")
+                raise RuleError(
+                    f"{host}:{port} 只能有一条不限 Host 的兜底规则"
+                    f"（已被规则「{label}」占用）")
+            seen[key] = rule
+        tls = {(r.get("tls_cert") or "", r.get("tls_key") or "") for r in group}
+        if len(tls) > 1:
+            raise RuleError(
+                f"{host}:{port} 上的多条规则必须使用相同的入口证书"
+                "（同一端口只能有一份 TLS 配置）")
+
+
 class _Target:
     """编译后的上游目标。"""
 
@@ -803,31 +863,79 @@ class _Target:
 
 
 class _Listener:
-    """一条规则对应的一组监听资源。"""
+    """一个监听端口（``listen_host:listen_port``）上的一组规则，按 Host 分发。"""
 
-    __slots__ = ("rule", "target", "sock", "thread", "tls_context", "conns",
-                 "family", "closed")
+    __slots__ = ("host", "port", "routes", "sock", "thread", "tls_context",
+                 "conns", "family", "closed")
 
-    def __init__(self, rule: dict, target: _Target):
-        self.rule = rule
-        self.target = target
+    def __init__(self, host: str, port: int):
+        self.host = str(host)
+        self.port = int(port)
+        #: match_host（小写，"" 表示兜底）→ (rule, _Target)
+        self.routes = {}
         self.sock = None
         self.thread = None
         self.tls_context = None
         self.conns = set()
         self.family = socket.AF_INET
-        #: 该规则被热移除/停止时置位：让在途连接的空闲等待立刻退出
+        #: 该端口被热移除/停止时置位：让在途连接的空闲等待立刻退出
         self.closed = threading.Event()
 
     @property
-    def rule_id(self) -> str:
-        return self.rule["id"]
+    def key(self) -> tuple:
+        return (self.host, self.port)
+
+    def add(self, rule: dict) -> None:
+        self.routes[rule.get("match_host") or ""] = (rule, _Target(rule))
+
+    def remove(self, rule_id: str) -> bool:
+        for key, (rule, _target) in list(self.routes.items()):
+            if rule["id"] == rule_id:
+                del self.routes[key]
+                return True
+        return False
+
+    def rules(self) -> list:
+        return [rule for rule, _target in self.routes.values()]
+
+    def default_rule(self) -> tuple:
+        """兜底规则：显式的不限 Host 规则；只有一个候选时就是它。"""
+        entry = self.routes.get("")
+        if entry is None and len(self.routes) == 1:
+            entry = next(iter(self.routes.values()))
+        return entry or (None, None)
+
+    def pick(self, host_header: str) -> tuple:
+        """按 Host 选规则：精确 → 通配（取最长） → 兜底。
+
+        返回 ``(rule, target)``；``(None, None)`` 表示没有可用的规则。
+        """
+        host = _host_only(host_header)
+        if host:
+            exact = self.routes.get(host)
+            if exact is not None:
+                return exact
+            best = None
+            for key, entry in self.routes.items():
+                if not key.startswith("*."):
+                    continue
+                suffix = key[1:]                       # ".example.com"
+                head = host[:-len(suffix)] if host.endswith(suffix) else ""
+                # 通配只吃一级标签：api.example.com 命中，a.api.example.com 不命中
+                if head and "." not in head:
+                    if best is None or len(key) > len(best[0]):
+                        best = (key, entry)
+            if best is not None:
+                return best[1]
+        # 兜底：显式的 match_host="" 规则；只有一条规则时用它；
+        # 多条 Host 规则且都不匹配 → (None, None)，由调用方回 404
+        return self.default_rule()
 
     def listen_label(self) -> str:
-        host = str(self.rule["listen_host"])
+        host = self.host
         if ":" in host:
             host = f"[{host}]"
-        return f"{host}:{self.rule['listen_port']}"
+        return f"{host}:{self.port}"
 
 
 class ReverseProxyServer:
@@ -860,7 +968,7 @@ class ReverseProxyServer:
         return self._started and not self._stop.is_set()
 
     def start(self) -> dict:
-        """绑定所有启用规则的监听端口。
+        """绑定所有启用规则的监听端口（同一端口的规则共用一个监听器）。
 
         返回 ``{"started": [...], "failed": [...]}``；全部失败抛
         :class:`ProxyStartError`（**不谎报成功**）。
@@ -868,41 +976,54 @@ class ReverseProxyServer:
         with function_scope("ReverseProxyServer.start"):
             with self._lock:
                 if self.running:
-                    return {"started": [self._listener_info(l)
-                                        for l in self._listeners.values()],
-                            "failed": []}
+                    return {"started": self.listeners(), "failed": []}
                 self._stop = threading.Event()
                 self._listeners = {}
                 self._started = True
 
-            started, failed = [], []
             enabled = [r for r in self._rules if r.get("enabled", True)]
             if not enabled:
                 self._started = False
                 raise ProxyStartError("没有已启用的规则，请先新建并启用一条规则")
+            try:
+                validate_groups(enabled)
+            except RuleError as e:
+                self._started = False
+                raise ProxyStartError(f"规则配置冲突：{e}")
 
+            started, failed = [], []
+            groups = {}
             for rule in enabled:
+                groups.setdefault((rule["listen_host"], rule["listen_port"]), []).append(rule)
+
+            for key, group in groups.items():
                 try:
-                    listener = self._bind_listener(rule)
-                except (ProxyError, OSError, ValueError) as e:
-                    reason = self._friendly_bind_error(rule, e)
-                    failed.append({"rule_id": rule["id"], "name": rule.get("name", ""),
-                                   "listen": rule_display(rule), "error": reason})
-                    log_error(f"反向代理规则启动失败 ({rule_display(rule)}): {reason}")
+                    listener = self._bind_listener(group)
+                except (ProxyError, RuleError, OSError, ValueError) as e:
+                    reason = self._friendly_bind_error(group[0], e)
+                    for rule in group:
+                        failed.append({"rule_id": rule["id"], "name": rule.get("name", ""),
+                                       "listen": rule_display(rule), "error": reason})
+                    log_error(f"反向代理监听失败 ({key[0]}:{key[1]}): {reason}")
                     continue
                 with self._lock:
-                    self._listeners[rule["id"]] = listener
-                    self._rule_stats.setdefault(rule["id"], {
-                        "requests": 0, "errors": 0, "bytes_in": 0, "bytes_out": 0})
-                thread = threading.Thread(target=self._accept_loop, args=(listener,),
-                                          name=f"proxy-accept-{rule['id']}", daemon=True)
+                    self._listeners[key] = listener
+                    for rule in group:
+                        self._rule_stats.setdefault(rule["id"], {
+                            "requests": 0, "errors": 0, "bytes_in": 0, "bytes_out": 0})
+                thread = threading.Thread(
+                    target=self._accept_loop, args=(listener,),
+                    name=f"proxy-accept-{key[0]}-{key[1]}", daemon=True)
                 listener.thread = thread
                 with self._lock:
                     self._threads.add(thread)
                 thread.start()
-                started.append(self._listener_info(listener))
-                info(f"反向代理已监听 {listener.listen_label()} → {rule['upstream']}"
-                     f"{'（TLS 终止）' if listener.tls_context else ''}")
+                started.extend(self._listener_infos(listener))
+                for rule in group:
+                    info(f"反向代理已监听 {listener.listen_label()}"
+                         f"{' [Host ' + rule['match_host'] + ']' if rule.get('match_host') else ''}"
+                         f" → {rule['upstream']}"
+                         f"{'（TLS 终止）' if listener.tls_context else ''}")
 
             if not started:
                 self._started = False
@@ -948,65 +1069,122 @@ class ReverseProxyServer:
         return {"stopped": len(listeners), "leaked_threads": len(alive)}
 
     def listeners(self) -> list:
+        """每条规则一条记录（同一端口的多条规则各自报告，便于界面标注状态）。"""
         with self._lock:
-            return [self._listener_info(l) for l in self._listeners.values()]
+            out = []
+            for listener in self._listeners.values():
+                out.extend(self._listener_infos(listener))
+            return out
 
-    def _listener_info(self, listener: _Listener) -> dict:
-        return {"rule_id": listener.rule_id,
-                "name": listener.rule.get("name", ""),
-                "listen_host": listener.rule["listen_host"],
-                "listen_port": listener.rule["listen_port"],
+    def _rule_listening(self, rule_id: str) -> bool:
+        """该规则当前是否挂在某个已绑定的监听器上（同端口多规则时逐条判断）。"""
+        for listener in self._listeners.values():
+            if any(rule["id"] == rule_id for rule in listener.rules()):
+                return True
+        return False
+
+    def _listener_infos(self, listener: _Listener) -> list:
+        infos = []
+        for rule in listener.rules():
+            infos.append({
+                "rule_id": rule["id"],
+                "name": rule.get("name", ""),
+                "listen_host": listener.host,
+                "listen_port": listener.port,
                 "listen": listener.listen_label(),
-                "upstream": listener.rule["upstream"],
-                "tls": listener.tls_context is not None}
+                "upstream": rule["upstream"],
+                "match_host": rule.get("match_host", ""),
+                "tls": listener.tls_context is not None,
+                "shared": len(listener.routes) > 1,
+            })
+        return infos
 
-    # ── 规则热更新 ──
+    def _listener_info(self, listener: _Listener, rule: dict = None) -> dict:
+        infos = self._listener_infos(listener)
+        if rule is None:
+            return infos[0] if infos else {}
+        for info in infos:
+            if info["rule_id"] == rule["id"]:
+                return info
+        return infos[0] if infos else {}
 
     def add_rule(self, rule) -> dict:
-        """热添加一条规则；``enabled`` 时立即开始监听。"""
+        """热添加一条规则；``enabled`` 时立即生效。
+
+        同一监听端口上已存在监听器时**复用**它（按 Host 分发），不重建 socket，
+        因此在途连接不受影响。
+        """
         rule = normalize_rule(rule)
         with self._lock:
             self._rules = [r for r in self._rules if r["id"] != rule["id"]]
             self._rules.append(rule)
             self._rule_stats.setdefault(rule["id"], {
                 "requests": 0, "errors": 0, "bytes_in": 0, "bytes_out": 0})
+            enabled = [r for r in self._rules if r.get("enabled", True)]
+        try:
+            validate_groups(enabled)
+        except RuleError as e:
+            return {"started": [], "failed": [{
+                "rule_id": rule["id"], "name": rule.get("name", ""),
+                "listen": rule_display(rule), "error": str(e)}]}
+
         result = {"started": [], "failed": []}
         if not rule.get("enabled", True) or not self._started:
             return result
+
+        key = (rule["listen_host"], rule["listen_port"])
+        with self._lock:
+            listener = self._listeners.get(key)
+        if listener is not None:
+            listener.add(rule)
+            result["started"].append(self._listener_info(listener, rule))
+            return result
+
         try:
-            listener = self._bind_listener(rule)
-        except (ProxyError, OSError, ValueError) as e:
+            listener = self._bind_listener([rule])
+        except (ProxyError, RuleError, OSError, ValueError) as e:
             reason = self._friendly_bind_error(rule, e)
             result["failed"].append({"rule_id": rule["id"], "name": rule.get("name", ""),
                                      "listen": rule_display(rule), "error": reason})
             log_error(f"反向代理规则启动失败 ({rule_display(rule)}): {reason}")
             return result
         with self._lock:
-            self._listeners[rule["id"]] = listener
+            self._listeners[key] = listener
         thread = threading.Thread(target=self._accept_loop, args=(listener,),
-                                  name=f"proxy-accept-{rule['id']}", daemon=True)
+                                  name=f"proxy-accept-{key[0]}-{key[1]}", daemon=True)
         listener.thread = thread
         with self._lock:
             self._threads.add(thread)
         thread.start()
-        result["started"].append(self._listener_info(listener))
+        result["started"].append(self._listener_info(listener, rule))
         return result
 
     def remove_rule(self, rule_id: str) -> bool:
-        """热移除规则并关闭其监听（已在途的连接自然结束）。"""
+        """热移除规则。
+
+        该端口上还有其它规则时只摘掉这一条路由（监听保留、在途连接自然结束）；
+        一条不剩时才关闭监听与连接。
+        """
         with self._lock:
-            listener = self._listeners.pop(rule_id, None)
+            existed = any(r["id"] == rule_id for r in self._rules)
             self._rules = [r for r in self._rules if r["id"] != rule_id]
-        if listener is None:
-            return False
-        # 先置位再关 socket：空闲等待用 select 分片轮询该标志，
-        # 不依赖"关闭 fd 能唤醒阻塞的 recv"（macOS 上 shutdown 可能抛
-        # ENOTCONN，此时 close() 并不会唤醒已在 recv 里的线程 —— 实测泄漏）
-        listener.closed.set()
-        self._close_socket(listener.sock)
-        for sock in list(listener.conns):
-            self._close_socket(sock)
-        return True
+        emptied = None
+        with self._lock:
+            for key, listener in list(self._listeners.items()):
+                if listener.remove(rule_id):
+                    if not listener.routes:
+                        self._listeners.pop(key, None)
+                        emptied = listener
+                    break
+        if emptied is not None:
+            # 先置位再关 socket：空闲等待用 select 分片轮询该标志，
+            # 不依赖"关闭 fd 能唤醒阻塞的 recv"（macOS 上 shutdown 可能抛
+            # ENOTCONN，此时 close() 并不会唤醒已在 recv 里的线程 —— 实测泄漏）
+            emptied.closed.set()
+            self._close_socket(emptied.sock)
+            for sock in list(emptied.conns):
+                self._close_socket(sock)
+        return existed
 
     def replace_rules(self, rules) -> dict:
         """全量替换规则（界面保存后应用）。"""
@@ -1036,7 +1214,7 @@ class ReverseProxyServer:
                 entry = dict(self._rule_stats.get(rule["id"], {
                     "requests": 0, "errors": 0, "bytes_in": 0, "bytes_out": 0}))
                 entry.update({"rule_id": rule["id"], "name": rule.get("name", ""),
-                              "listening": rule["id"] in self._listeners})
+                              "listening": self._rule_listening(rule["id"])})
                 rules.append(entry)
             out["rules"] = rules
             return out
@@ -1087,12 +1265,16 @@ class ReverseProxyServer:
             return f"绑定失败: {exc}"
         return str(exc)
 
-    def _bind_listener(self, rule: dict) -> _Listener:
-        target = _Target(rule)
-        listener = _Listener(rule, target)
+    def _bind_listener(self, group: list) -> _Listener:
+        """为一个监听端口（可能挂多条按 Host 分发的规则）绑定 socket。"""
+        group = list(group)
+        first = group[0]
+        listener = _Listener(first["listen_host"], first["listen_port"])
+        for rule in group:
+            listener.add(rule)
 
-        if rule.get("tls_cert"):
-            cert, key = rule["tls_cert"], rule["tls_key"]
+        cert, key = first.get("tls_cert") or "", first.get("tls_key") or ""
+        if cert:
             for path in (cert, key):
                 if not os.path.isfile(path):
                     raise RuleError(f"入口 TLS 证书/私钥文件不存在: {path}")
@@ -1104,7 +1286,7 @@ class ReverseProxyServer:
                 raise RuleError(f"加载入口 TLS 证书失败: {e}")
             listener.tls_context = ctx
 
-        host = rule["listen_host"]
+        host = first["listen_host"]
         family = socket.AF_INET6 if ":" in host else socket.AF_INET
         listener.family = family
         sock = socket.socket(family, socket.SOCK_STREAM)
@@ -1114,7 +1296,7 @@ class ReverseProxyServer:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if family == socket.AF_INET6:
                 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-            sock.bind((host, rule["listen_port"]))
+            sock.bind((host, first["listen_port"]))
             sock.listen(128)
             sock.settimeout(0.5)
         except BaseException:
@@ -1124,7 +1306,6 @@ class ReverseProxyServer:
         return listener
 
     def _accept_loop(self, listener: _Listener) -> None:
-        rule = listener.rule
         while not self._stop.is_set():
             try:
                 conn, addr = listener.sock.accept()
@@ -1145,7 +1326,7 @@ class ReverseProxyServer:
                 listener.conns.add(conn)
             thread = threading.Thread(
                 target=self._client_entry, args=(listener, conn, addr),
-                name=f"proxy-conn-{rule['id']}", daemon=True)
+                name=f"proxy-conn-{listener.host}-{listener.port}", daemon=True)
             with self._lock:
                 self._threads.add(thread)
             thread.start()
@@ -1232,9 +1413,9 @@ class ReverseProxyServer:
         return False
 
     def _handle_client(self, listener: _Listener, conn, addr) -> None:
-        rule = listener.rule
         client_ip = addr[0] if isinstance(addr, tuple) and addr else ""
-        read_timeout = float(rule["read_timeout"])
+        base_rule, _base_target = listener.default_rule()
+        read_timeout = float(base_rule["read_timeout"]) if base_rule else DEFAULT_READ_TIMEOUT
         conn.settimeout(read_timeout)
         reader = _Reader(conn, "客户端")
         upstream = None
@@ -1249,13 +1430,13 @@ class ReverseProxyServer:
                 except _Closed:
                     return
                 except _TooLarge as e:
-                    self._error_event(rule, "?", "?", 431, client_ip, str(e))
+                    self._error_event(base_rule, "?", "?", 431, client_ip, str(e))
                     self._send_raw(conn, 431, "Request Header Fields Too Large", str(e))
                     return
                 except _Timeout:
                     return
                 except _BadRequest as e:
-                    self._error_event(rule, "?", "?", 400, client_ip, str(e))
+                    self._error_event(base_rule, "?", "?", 400, client_ip, str(e))
                     self._send_raw(conn, 400, "Bad Request", str(e))
                     return
 
@@ -1263,24 +1444,44 @@ class ReverseProxyServer:
                     req = _parse_request_head(head)
                     body_mode, body_size = _request_body_mode(req)
                 except _TooLarge as e:
-                    self._error_event(rule, "?", "?", 431, client_ip, str(e))
+                    self._error_event(base_rule, "?", "?", 431, client_ip, str(e))
                     self._send_raw(conn, 431, "Request Header Fields Too Large", str(e))
                     return
                 except _BadRequest as e:
-                    self._error_event(rule, "?", "?", 400, client_ip, str(e))
+                    self._error_event(base_rule, "?", "?", 400, client_ip, str(e))
                     self._send_raw(conn, 400, "Bad Request", str(e))
                     return
 
+                # 同一入口可挂多条规则：按 Host 头（CONNECT 用 authority）分发
+                rule, target = listener.pick(
+                    req.authority if req.method == "CONNECT" else req.host_header)
+                if rule is None:
+                    detail = (f"该入口没有匹配 Host {req.host_header or '(未提供)'} 的规则"
+                              "（可用规则: " + listener.listen_label() + "）")
+                    self._send_raw(conn, 404, "Not Found", detail)
+                    # 无归属事件（rule_id=""）：这类 404 恰恰是用户最需要看到的，
+                    # 只写日志文件的话界面上的访问日志会"看起来一切正常"
+                    self._record({"ts": time.time(), "rule_id": "", "method": req.method,
+                                  "target": req.target, "status": 404, "ms": 0,
+                                  "bytes_in": 0, "bytes_out": 0, "client": client_ip,
+                                  "error": detail, "upgrade": False})
+                    warn(f"反向代理无匹配规则: {detail}")
+                    return
+
+                read_timeout = float(rule["read_timeout"])
+                conn.settimeout(read_timeout)
                 idle_deadline = time.monotonic() + read_timeout
 
                 if req.method == "CONNECT":
-                    self._handle_connect(listener, conn, reader, req, client_ip)
+                    self._handle_connect(listener, conn, reader, req, client_ip,
+                                         rule, target)
                     return
 
                 started = time.monotonic()
                 keep_client = self._want_keepalive(req)
                 upstream, keep_upstream, status, error, bytes_in, bytes_out = self._forward(
-                    listener, conn, reader, req, body_mode, body_size, upstream, client_ip)
+                    listener, conn, reader, req, body_mode, body_size, upstream,
+                    client_ip, rule, target)
                 if status is None:
                     return
                 self._record({
@@ -1307,6 +1508,8 @@ class ReverseProxyServer:
 
     def _error_event(self, rule: dict, method: str, target: str, status: int,
                      client: str, error: str) -> None:
+        if not rule:
+            return
         self._record({"ts": time.time(), "rule_id": rule["id"], "method": method,
                       "target": target, "status": status, "ms": 0, "bytes_in": 0,
                       "bytes_out": 0, "client": client, "error": error,
@@ -1315,18 +1518,18 @@ class ReverseProxyServer:
     # ── 转发 ──
 
     def _forward(self, listener: _Listener, conn, reader: _Reader, req: _Request,
-                 body_mode: str, body_size: int, upstream, client_ip: str):
-        """转发一次请求。
+                 body_mode: str, body_size: int, upstream, client_ip: str,
+                 rule: dict, target: _Target):
+        """转发一次请求（``rule``/``target`` 是本次按 Host 选中的规则）。
 
         返回 ``(upstream, keep_upstream, status, error, bytes_in, bytes_out)``；
         ``status is None`` 表示本次不记事件（隧道或客户端提前断开）。
         """
-        rule, target = listener.rule, listener.target
         bytes_in = len(req.target)  # 请求行+头的粗略计数在下面累加
         bytes_out = 0
 
         # 1) 连接上游（按需复用）
-        if upstream is not None and upstream[3]:
+        if upstream is not None and upstream[3] and upstream[2] is target:
             up_sock, up_reader = upstream[0], upstream[1]
         else:
             if upstream is not None:
@@ -1747,8 +1950,14 @@ class ReverseProxyServer:
     # ── CONNECT 与隧道 ──
 
     def _handle_connect(self, listener: _Listener, conn, reader: _Reader,
-                        req: _Request, client_ip: str) -> None:
-        rule, target = listener.rule, listener.target
+                        req: _Request, client_ip: str,
+                        rule: dict = None, target: _Target = None) -> None:
+        if rule is None or target is None:
+            rule, target = listener.pick(_host_only(req.authority))
+        if rule is None or target is None:
+            detail = "该入口没有匹配 CONNECT 目标的规则"
+            self._send_raw(conn, 403, "Forbidden", detail)
+            return
         started = time.monotonic()
         if not rule.get("allow_connect", True):
             self._send_raw(conn, 403, "Forbidden", "该规则已禁用 CONNECT 隧道")

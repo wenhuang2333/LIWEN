@@ -50,7 +50,7 @@ python code/tools/verify_multiplayer.py --audio    # +3 real audio-device checks
 python code/tools/fuzz_multiplayer.py              # 15 adversarial protocol checks (A–I); can pass section letters
 # NOTE: verify and fuzz both bind UDP 12347 — never run them concurrently.
 
-python code/tools/verify_reverse_proxy.py          # 100-check reverse-proxy suite (self-hosted upstream, no network)
+python code/tools/verify_reverse_proxy.py          # 119-check reverse-proxy suite (self-hosted upstream, no network)
 python code/tools/fuzz_reverse_proxy.py            # 41 adversarial reverse-proxy checks (+200 random mutations)
 # NOTE: the reverse-proxy suites use ephemeral 127.0.0.1 ports only, so they may run alongside
 # the multiplayer suites (which own 12345/12346/12347).
