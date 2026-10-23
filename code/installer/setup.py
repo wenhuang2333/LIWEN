@@ -191,7 +191,8 @@ class InstallThread(threading.Thread):
                     working_dir=self._install_dir,
                     icon=icon_path,
                     description=APP_NAME,
-                    run_as_admin=True,
+                    # 联机已改为纯应用层组网，应用本体不再需要管理员权限
+                    run_as_admin=False,
                 )
 
             if self._create_start_menu:
@@ -204,7 +205,7 @@ class InstallThread(threading.Thread):
                     working_dir=self._install_dir,
                     icon=icon_path,
                     description=APP_NAME,
-                    run_as_admin=True,
+                    run_as_admin=False,
                 )
 
             # Step 6: Write uninstaller
@@ -294,9 +295,9 @@ class WelcomePage(QWizardPage):
 
         desc = QLabel(
             f"{APP_NAME} 是一款集文件压缩/解压、局域网文件传输、\n"
-            f"局域网联机大厅/VPN隧道联机、可视化网页爬虫、\n"
+            f"局域网联机大厅、可视化网页爬虫、\n"
             f"HTTP请求发送、AI智能对话、磁盘空间索引分析、\n"
-            f"故障检测与修复于一体的 Windows 桌面工具。\n\n"
+            f"故障检测与修复于一体的跨平台桌面工具。\n\n"
             f"本安装程序将把应用文件解压到您指定的目录，\n"
             f"并创建桌面和开始菜单快捷方式。"
         )

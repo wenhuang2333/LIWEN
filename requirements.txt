@@ -26,5 +26,11 @@ openpyxl>=3.1.0                  # 爬虫结果导出 .xlsx
 pyinstaller>=6.0.0
 Pillow>=10.0.0                   # code/build.py 生成 .ico / .png 图标
 
+# ── 联机语音（房间语音通话）──
+# sounddevice 是推荐后端：py3-none-any + macOS/Windows 全架构 wheel，
+# 自带 PortAudio 二进制，Linux 仅需系统 libportaudio2。
+# 缺失时语音功能自动禁用并给出安装提示，不影响联机的其他部分。
+sounddevice>=0.5.0
+
 # ── 可选（缺失时对应功能显示提示而非崩溃）──
-# pyaudio>=0.2.13                # 局域网语音通话
+# pyaudio>=0.2.13                # 语音回退后端（仅 Windows 有 wheel，不推荐）

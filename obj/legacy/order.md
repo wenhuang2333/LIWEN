@@ -528,7 +528,7 @@ python main.py settings-list --json
 | 功能 | 原因 |
 |------|------|
 | 语音聊天 (Voice Chat) | 需要实时音频输入输出 |
-| VPN 隧道 (VPN Tunneling) | 需要虚拟网卡管理和实时轮询 |
+| ~~VPN 隧道 (VPN Tunneling)~~ | ~~需要虚拟网卡管理和实时轮询~~ —— **该方案已于 v4.18.0 删除**（联机改为纯应用层组网，房间相关 CLI 为 `room-scan`/`room-create`/`room-probe`/`room-join`） |
 | 可视化爬虫配置 | 需要嵌入式 Chromium 浏览器进行元素选取 |
 | 拖放文件操作 | 需要 GUI 拖放交互 |
 | 归档预览对话框 | 需要表格 UI 和选择性提取界面 |

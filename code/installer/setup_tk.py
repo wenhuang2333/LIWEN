@@ -161,9 +161,9 @@ class SetupWizard(tk.Tk):
 
         desc = (
             f"{APP_NAME} 是一款集文件压缩/解压、局域网文件传输、\n"
-            "局域网联机大厅/VPN隧道联机、可视化网页爬虫、\n"
+            "局域网联机大厅、可视化网页爬虫、\n"
             "HTTP请求发送、AI智能对话、磁盘空间索引分析、\n"
-            "故障检测与修复于一体的 Windows 桌面工具。\n\n"
+            "故障检测与修复于一体的跨平台桌面工具。\n\n"
             "本安装程序将把应用文件解压到您指定的目录，\n"
             "并创建桌面和开始菜单快捷方式。"
         )
@@ -341,7 +341,7 @@ class SetupWizard(tk.Tk):
                 desktop_lnk = os.path.join(get_desktop_path(), f"{APP_NAME}.lnk")
                 create_shortcut(main_exe, desktop_lnk,
                                 working_dir=install_dir, icon=main_exe,
-                                description=APP_NAME, run_as_admin=True)
+                                description=APP_NAME, run_as_admin=False)
 
             if create_start:
                 start_dir = os.path.join(get_start_menu_programs_path(), APP_NAME)
@@ -349,7 +349,7 @@ class SetupWizard(tk.Tk):
                 start_lnk = os.path.join(start_dir, f"{APP_NAME}.lnk")
                 create_shortcut(main_exe, start_lnk,
                                 working_dir=install_dir, icon=main_exe,
-                                description=APP_NAME, run_as_admin=True)
+                                description=APP_NAME, run_as_admin=False)
 
             # Step 6: Write uninstaller
             self._write_uninstaller(install_dir)

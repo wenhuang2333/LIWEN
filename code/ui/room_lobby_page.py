@@ -1,8 +1,11 @@
-"""联机大厅 — 房间创建、发现、加入（纯局域网，无 VPN）
+"""联机大厅 — 房间创建、发现、加入（纯应用层组网）
 
-LobbyView: create room form + LAN room list + saved rooms list.
-RoomPage: simplified in-room view with peer list and voice.
-All communication uses real LAN IP addresses.
+LobbyView: create room form + LAN room list + saved rooms list + 直连加入(IP:端口)。
+RoomPage: in-room view with peer list, voice, and file transfer.
+
+联机不依赖任何虚拟网卡 / TUN 驱动 / 管理员权限：所有通信都走真实局域网 IP，
+协议层（UDP 广播发现 + TCP 挑战-应答加入 + 心跳名单）天然跨平台，
+Windows 与 macOS 混连使用同一套代码。
 """
 
 import hashlib
@@ -19,15 +22,18 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from ui.room_page import RoomPage
 from core.workers import (
     RoomHostWorker, RoomScanWorker, RoomJoinWorker, RoomSessionWorker,
+    RoomProbeWorker,
 )
 from utils.room_store import room_store
 from utils.settings import settings
 from utils.constants import room_data_port_for_room
+from utils.logger import info, warn
 
 
 class LobbyView(QWidget):
     create_room = pyqtSignal(dict)
     join_room = pyqtSignal(dict)
+    direct_join = pyqtSignal(str, int)
     scan_requested = pyqtSignal()
     delete_saved = pyqtSignal(str)
 
@@ -82,7 +88,9 @@ class LobbyView(QWidget):
         # Port
         left_layout.addWidget(QLabel("通信端口"))
         self._create_port = QSpinBox()
-        self._create_port.setRange(1024, 65535)
+        # 加入服务监听 port+1，所以房间端口最大 65534（65535+1 越界，会让
+        # 加入线程直接死掉：房间照常广播，但谁也进不来）
+        self._create_port.setRange(1024, 65534)
         self._create_port.setValue(12345)
         left_layout.addWidget(self._create_port)
 
@@ -96,6 +104,7 @@ class LobbyView(QWidget):
         # Hint
         save_hint = QLabel(
             "同一局域网（相同路由器/WiFi/热点）下使用。\n"
+            "跨网段或广播被拦截时，对方可用右侧「直连加入」填本机 IP。\n"
             "创建的房间会自动保存，可在右侧列表中快速加入。")
         save_hint.setWordWrap(True)
         save_hint.setStyleSheet("color: #9498a4; font-size: 11px;")
@@ -137,6 +146,28 @@ class LobbyView(QWidget):
         scan_row.addWidget(self._scan_status)
         scan_row.addStretch()
         right.addLayout(scan_row)
+
+        # ── Direct connect (UDP 广播不可达时手工填 IP:端口) ──
+        direct_label = QLabel("直连加入（跨网段 / 广播被拦截时使用）")
+        direct_label.setObjectName("sectionTitle")
+        right.addWidget(direct_label)
+
+        direct_row = QHBoxLayout()
+        direct_row.setSpacing(8)
+        self._direct_ip = QLineEdit()
+        self._direct_ip.setPlaceholderText("主机 IP，例如 192.168.1.20")
+        self._direct_ip.returnPressed.connect(self._on_direct_join)
+        direct_row.addWidget(self._direct_ip, 3)
+        self._direct_port = QSpinBox()
+        self._direct_port.setRange(1024, 65534)
+        self._direct_port.setValue(12345)
+        self._direct_port.setMaximumWidth(96)
+        direct_row.addWidget(self._direct_port)
+        self._direct_btn = QPushButton("连接")
+        self._direct_btn.setObjectName("secondaryBtn")
+        self._direct_btn.clicked.connect(self._on_direct_join)
+        direct_row.addWidget(self._direct_btn)
+        right.addLayout(direct_row)
 
         # Saved rooms
         saved_label = QLabel("已保存的房间")
@@ -252,6 +283,14 @@ class LobbyView(QWidget):
         elif selected.get("from_discovered"):
             self.join_room.emit(selected["data"])
 
+    def _on_direct_join(self):
+        """手工填 IP:端口 直连 —— 交给页面探测后再走正常加入流程。"""
+        host_ip = self._direct_ip.text().strip()
+        if not host_ip:
+            QMessageBox.warning(self, "提示", "请输入房间主机的 IP 地址")
+            return
+        self.direct_join.emit(host_ip, self._direct_port.value())
+
     def _on_delete_saved(self):
         item = self._saved_list.currentItem()
         if item:
@@ -320,6 +359,11 @@ class RoomLobbyPage(QWidget):
         self._scan_worker = None
         self._join_worker = None
         self._session_worker = None
+        self._probe_worker = None
+        # 每次探测的序号：晚到的探测结果靠它作废，避免用户离开大厅后
+        # 旧线程的信号再弹出密码框 / 启动加入流程。
+        self._probe_seq = 0
+        self._direct_room = None
 
         self._setup_ui()
         self._connect_signals()
@@ -358,6 +402,7 @@ class RoomLobbyPage(QWidget):
     def _connect_signals(self):
         self._lobby.create_room.connect(self._on_create_room)
         self._lobby.join_room.connect(self._on_join_room)
+        self._lobby.direct_join.connect(self._on_direct_join)
         self._lobby.scan_requested.connect(self._on_scan)
         self._lobby.delete_saved.connect(self._on_delete_saved)
         self._room_view.leave_requested.connect(self._on_leave_room)
@@ -471,13 +516,87 @@ class RoomLobbyPage(QWidget):
             lambda e: self._lobby.set_scan_status(f"加入失败: {e}"))
         self._join_worker.start()
 
+    # ── Direct connect (IP:port, no UDP broadcast needed) ──
+
+    def _on_direct_join(self, host_ip: str, port: int):
+        """探测目标地址上的房间，再走与广播发现完全相同的加入流程。"""
+        if self._probe_worker is not None:
+            if self._probe_worker.isRunning():
+                self._lobby.set_scan_status("正在探测，请稍候…")
+                return
+            # 上一轮已结束，先安全释放引用再开新一轮
+            self._stop_probe()
+        self._lobby.set_scan_status(f"正在探测 {host_ip}:{port} …")
+        self._direct_room = None
+        self._probe_seq += 1
+        seq = self._probe_seq
+        worker = RoomProbeWorker(host_ip, port)
+        worker.finished.connect(
+            lambda ok, msg, info, s=seq: self._on_probe_result(ok, msg, info, s))
+        worker.error.connect(
+            lambda e: self._lobby.set_scan_status(f"探测失败: {e}"))
+        self._probe_worker = worker
+        worker.start()
+
+    def _on_probe_result(self, ok: bool, message: str, room_info: dict,
+                         seq: int = -1):
+        # 晚到的结果（用户已返回大厅 / 已开始新一轮探测）直接丢弃
+        if seq != self._probe_seq:
+            return
+        # 该 worker 的信号在 run() 末尾发出，此时线程尚未完全结束——引用留在
+        # _probe_worker 里，由 _stop_probe() 负责断开信号并释放，避免在运行中
+        # 回收 QThread 对象。
+        if self.sender() is not self._probe_worker:
+            return
+        # 注意：参数名不能用 info —— 会遮蔽模块级的 utils.logger.info
+        if not ok or not room_info:
+            self._lobby.set_scan_status(f"探测失败: {message}")
+            QMessageBox.warning(
+                self, "连接失败",
+                f"{message}\n\n请确认：\n"
+                f"• 主机已创建房间且程序仍在运行\n"
+                f"• 填的是**房间端口**（与主机「通信端口」一致，如 12345）\n"
+                f"• 双方网络互通（跨网段需主机端口可达）")
+            return
+
+        room_id = room_info.get("room_id", "")
+        # room_id 会成为字典键；协议层已校验类型，这里再兜一层，避免任何
+        # 非字符串值在 Qt 槽里抛 TypeError（未捕获的槽异常会让进程 abort）
+        if not isinstance(room_id, str) or not room_id:
+            self._lobby.set_scan_status("探测结果无效：缺少 room_id")
+            return
+        host_ip = room_info.get("host_ip", "")
+        port = room_info.get("port", 0)
+        self._lobby.set_scan_status(
+            f"发现房间「{room_info.get('room_name', '?')}」"
+            f"（{room_info.get('player_count', 0)}/"
+            f"{room_info.get('max_players', 8)} 人）")
+        info(f"直连探测成功: {room_id} @ {host_ip}:{port}")
+
+        # 探测到的房间信息并入「发现的房间」列表，方便用户看到并复用
+        self._lobby.set_discovered_rooms({room_id: room_info})
+
+        password = ""
+        if room_info.get("has_password"):
+            password, ok_input = QInputDialog.getText(
+                self, "需要密码",
+                f"房间「{room_info.get('room_name', '')}」需要密码:",
+                QLineEdit.EchoMode.Password)
+            if not ok_input:
+                return
+        self._lobby.set_scan_status("正在加入...")
+        self._start_join_worker(host_ip, port, room_id, password)
+
     def _on_join_result(self, success: bool, message: str, config: dict):
         self._lobby.set_scan_status(message)
         if success:
-            if not config or not config.get("room_id"):
+            room_id = (config or {}).get("room_id", "")
+            # room_id 会被当作字典键（room_store.exists / add），非字符串会让
+            # Qt 槽抛 TypeError → abort
+            if not isinstance(room_id, str) or not room_id:
                 QMessageBox.warning(self, "加入失败", "房间主机返回了无效的配置")
                 return
-            if not room_store.exists(config.get("room_id", "")):
+            if not room_store.exists(room_id):
                 room_store.add(dict(config))
                 self._lobby._refresh_saved()
             self._enter_room(config)
@@ -531,8 +650,42 @@ class RoomLobbyPage(QWidget):
             "请返回大厅后重新加入房间。")
         self._leave_room_ui()
 
+    def _stop_probe(self, grace_ms: int = 2000):
+        """作废在途探测并停止探测线程。
+
+        *grace_ms* 是等待上限：用户离开大厅时用默认的 2s（不能卡住界面），
+        `cleanup()` 关闭程序时给足 6s 把线程排干，避免解释器退出时回收
+        仍在运行的 QThread。
+        """
+        # 先作废在途结果，再取消线程；即使用户马上重新探测，旧结果也不会串台
+        self._probe_seq += 1
+        worker = self._probe_worker
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.cancel()
+                # probe_room() 的 connect 最长阻塞 5s，取消标志无法打断它，
+                # 所以这里只做有界等待：仍在跑就**保留引用**交给它自然结束
+                # （丢引用会让运行中的 QThread 被回收 → 进程崩溃）。
+                if not worker.wait(grace_ms):
+                    warn(f"RoomLobbyPage: 探测线程未在 {grace_ms}ms 内结束，"
+                         "保留引用等待其自然退出")
+                    return
+        except Exception as e:
+            warn(f"RoomLobbyPage: 停止探测线程异常: {e}")
+            return
+        # 已结束：断开单个信号后再丢引用（不要用无参 disconnect()）
+        for sig in (worker.finished, worker.error):
+            try:
+                sig.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+        self._probe_worker = None
+
     def _leave_room_ui(self):
         self._stop_session()
+        self._stop_probe()
         self._room_view.shutdown()
         if self._host_worker and self._host_worker.isRunning():
             self._host_worker.cancel()
@@ -543,7 +696,6 @@ class RoomLobbyPage(QWidget):
         self._current_room = None
         self._stack.setCurrentIndex(0)
         self._lobby._refresh_saved()
-
     # ── Scan rooms ──
 
     def _on_scan(self):
@@ -585,6 +737,8 @@ class RoomLobbyPage(QWidget):
 
     def cleanup(self):
         self._stop_session()
+        # 关闭程序时给足时间排干探测线程（connect 最长 5s）
+        self._stop_probe(6000)
         self._room_view.shutdown()
         if self._current_room:
             self._on_leave_room()

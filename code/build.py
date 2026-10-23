@@ -41,42 +41,6 @@ from utils.constants import (  # noqa: E402
 )
 
 
-def _wintun_binary():
-    """准备 wintun.dll，返回 PyInstaller 的 --add-binary 参数（仅 Windows 构建）。
-
-    VPN 隧道（`ui/vpn_page.py` + `lan_vpn`）依赖该驱动，且它必须与 exe 同级。
-    此前 `extra_binaries=[]`，导致打出来的安装包一律缺少该驱动 —— 功能存在却
-    永远用不了。这里先校验/补齐，再显式打进包内；非 Windows 平台不打包 Windows DLL。
-    """
-    if sys.platform != "win32":
-        return None
-
-    tools_dir = os.path.join(CODE_DIR, "tools")
-    path = None
-    try:
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
-        from fetch_wintun import ensure_wintun  # type: ignore
-        path = ensure_wintun()
-    except Exception as e:  # noqa: BLE001 — 构建不应因驱动问题整体失败
-        print(f"wintun.dll 校验/获取失败: {e}")
-        candidate = os.path.join(PROJECT_ROOT, "wintun.dll")
-        path = candidate if os.path.isfile(candidate) else None
-
-    if not path or not os.path.isfile(path):
-        print("警告: 未找到 wintun.dll，产出的安装包将无法使用 VPN 隧道功能。")
-        print("      可执行 `python code/tools/fetch_wintun.py` 获取官方驱动。")
-        return None
-
-    print(f"打包 wintun.dll: {path}")
-    return f"{path}{os.pathsep}."
-
-
-def _extra_binaries():
-    """收集需要随包分发的原生依赖。"""
-    return [b for b in (_wintun_binary(),) if b]
-
-
 def _clean():
     for path in [DIST_DIR, BUILD_DIR]:
         if os.path.exists(path):
@@ -174,8 +138,8 @@ def _pyinstaller_cmd(script, name, onefile=True, extra_data=None,
     cmd = [sys.executable, "-m", "PyInstaller"]
     cmd += ["--onefile"] if onefile else ["--onedir"]
     cmd += ["--windowed"] if not console else []
-    if sys.platform == "win32":
-        cmd += ["--uac-admin"]
+    # 不再请求管理员权限：联机已改为纯应用层组网，不需要虚拟网卡/驱动，
+    # 应用本体没有任何需要提权的操作（右键菜单由安装程序单独以管理员身份注册）。
     cmd += ["--name", name, "--clean", "--noconfirm"]
     if not upx:
         cmd += ["--noupx"]
@@ -348,11 +312,10 @@ def build_app():
         hidden_imports=[
             "Crypto", "Crypto.Cipher.AES", "Crypto.Protocol.KDF",
             "Crypto.Hash.SHA256", "tarfile", "gzip", "bz2", "lzma",
-            "pyaudio",
+            "sounddevice",
             "PyQt6.QtWebChannel",
         ],
         excludes=_unused_qt_modules,
-        extra_binaries=_extra_binaries(),
         extra_data=extra_data,
     )
     print(f"命令: {' '.join(cmd)}")
@@ -401,7 +364,7 @@ def build_repair():
         hidden_imports=[
             "Crypto", "Crypto.Cipher.AES", "Crypto.Protocol.KDF",
             "Crypto.Hash.SHA256", "tarfile", "gzip", "bz2", "lzma",
-            "pyaudio",
+            "sounddevice",
             "PyQt6.QtWebChannel",
         ],
         excludes=_repair_excludes,

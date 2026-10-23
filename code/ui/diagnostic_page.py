@@ -229,19 +229,56 @@ def _chk_room_scan(log) -> CheckResult:
                            suggestions=["确认 UDP 12347 未被防火墙阻止"])
 
 
-def _chk_pyaudio(log) -> CheckResult:
+def _chk_audio_backend(log) -> CheckResult:
+    """音频后端检测：sounddevice（推荐）或 PyAudio（回退）。
+
+    后端库只是"能不能用"的一半，另一半是设备是否真的能打开 —— 这里顺带
+    报告设备数量，让"库在但没设备"这种情况也能被看出来。
+    """
     try:
-        from network.voice_protocol import is_voice_available
-        if is_voice_available():
+        from network.voice_protocol import (
+            is_voice_available, voice_backend_name, INSTALL_HINT)
+        backend = voice_backend_name()
+        if not is_voice_available():
+            return CheckResult(
+                status="warning",
+                detail="音频后端未安装，房间语音不可用",
+                suggestions=[INSTALL_HINT])
+        count = _count_audio_devices(backend)
+        if count < 0:
+            # 设备枚举失败 ≠ 通过：不能报「可用，-1 个设备」这种自相矛盾的结论
+            return CheckResult(
+                status="warning",
+                detail=f"{backend} 已安装，但无法枚举音频设备",
+                suggestions=["确认系统允许本程序访问麦克风/扬声器",
+                             "重新插拔或重启音频设备后重试"])
+        if count == 0:
+            return CheckResult(
+                status="warning",
+                detail=f"{backend} 已安装，但未检测到音频设备",
+                suggestions=["检查系统音频设备/麦克风是否被禁用"])
+        return CheckResult(
+            status="pass", detail=f"{backend} 可用，{count} 个音频设备")
+    except Exception as e:
+        return CheckResult(status="warning", detail=f"音频后端异常: {e}")
+
+
+def _count_audio_devices(backend: str) -> int:
+    """枚举音频设备数量；后端查询失败时返回 -1（不阻塞检测流程）。"""
+    try:
+        if backend == "sounddevice":
+            import sounddevice as sd
+            return len(sd.query_devices())
+        if backend == "pyaudio":
             import pyaudio
             pa = pyaudio.PyAudio()
-            count = pa.get_device_count()
-            pa.terminate()
-            return CheckResult(status="pass", detail=f"PyAudio 可用，{count} 个音频设备")
-        return CheckResult(status="warning", detail="PyAudio 未安装，语音功能不可用",
-                           suggestions=["pip install pyaudio"])
+            try:
+                return pa.get_device_count()
+            finally:
+                pa.terminate()
     except Exception as e:
-        return CheckResult(status="warning", detail=f"PyAudio 异常: {e}")
+        log_warn(f"枚举音频设备失败: {e}")
+    return -1
 
 
 def _chk_voice_protocol(log) -> CheckResult:
@@ -843,28 +880,44 @@ def _repair_free_port_unix(log, port: int) -> tuple[bool, str]:
         return False, f"释放端口 {port} 失败: {e}"
 
 
-def _repair_install_pyaudio(log) -> tuple[bool, str]:
-    """Attempt to install PyAudio via pip."""
+def _repair_install_audio(log) -> tuple[bool, str]:
+    """通过 pip 安装推荐的音频后端 sounddevice。
+
+    不再安装 PyAudio：它在 PyPI 上只有 Windows wheel，macOS/Linux 需要本地
+    编译 PortAudio，Python 3.14 更是没有 wheel —— 这正是此前"语音永远装不上"
+    的根因。sounddevice 是全平台 wheel，装完即用。
+    """
     try:
-        log("正在安装 PyAudio…")
+        # 冻结（PyInstaller）后 sys.executable 是应用自己的 EXE，`-m pip`
+        # 只会把程序再启动一遍 —— 与其假装安装成功，不如如实说明。
+        if getattr(sys, "frozen", False):
+            return False, (
+                "打包版已内置音频后端，无法（也无需）通过 pip 安装。\n"
+                "请确认系统允许本程序访问麦克风/扬声器；若后端确实缺失，"
+                "请重新安装或更新本程序。")
+        log("正在安装 sounddevice…")
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "pyaudio"],
-            capture_output=True, text=True, timeout=60,
+            [sys.executable, "-m", "pip", "install", "sounddevice"],
+            capture_output=True, text=True, timeout=180,
             creationflags=_subprocess_flags())
         if result.returncode == 0:
+            # 让 voice_protocol 重新探测后端（模块级缓存了上一次结果）
             try:
-                import pyaudio
-                pa = pyaudio.PyAudio()
-                count = pa.get_device_count()
-                pa.terminate()
-                return True, f"PyAudio 安装成功，检测到 {count} 个音频设备"
-            except ImportError:
-                return False, "pip 安装完成但导入仍失败，请重启程序后重试"
+                import network.voice_protocol as vp
+                vp._BACKEND_PROBED = False
+                vp._BACKEND_NAME = None
+            except Exception:
+                pass
+            from network.voice_protocol import voice_backend_name
+            backend = voice_backend_name()
+            if backend:
+                return True, f"音频后端已就绪（{backend}）"
+            return False, "pip 安装完成但仍未探测到可用后端，请重启程序后重试"
         else:
             detail = result.stderr.strip() or result.stdout.strip()
-            return False, f"PyAudio 安装失败: {detail[:300]}"
+            return False, f"sounddevice 安装失败: {detail[:300]}"
     except Exception as e:
-        return False, f"PyAudio 安装异常: {e}"
+        return False, f"sounddevice 安装异常: {e}"
 
 
 def _repair_repair_config(log) -> tuple[bool, str]:
@@ -1097,7 +1150,7 @@ def _repair_repair_http_variables(log) -> tuple[bool, str]:
 # mode: "lan" = only available in LAN detection mode, "basic" = only in basic mode
 REPAIR_REGISTRY: dict[str, tuple[str, callable, bool, str]] = {
     "free_port":          ("释放被占端口",          None,                         False, "lan"),
-    "install_pyaudio":    ("安装 PyAudio",          _repair_install_pyaudio,      False, "lan"),
+    "install_audio":      ("安装音频后端",        _repair_install_audio,        False, "lan"),
     "repair_config":      ("修复配置文件",          _repair_repair_config,        False, "basic"),
     "reset_index_db":       ("重置空间索引数据库",    _repair_reset_index_db,         False, "basic"),
     "repair_ai_config":     ("重置AI配置",            _repair_repair_ai_config,       False, "basic"),
@@ -1111,7 +1164,8 @@ REPAIR_REGISTRY: dict[str, tuple[str, callable, bool, str]] = {
 # Check registries — split by detection mode
 # ═══════════════════════════════════════════════
 
-# LAN detection: everything related to LAN transfer, rooms, voice, VPN
+# LAN detection: everything related to LAN transfer, rooms, and voice
+# （联机已改为纯应用层组网，不再有 VPN/虚拟网卡检测项）
 LAN_CHECKS = [
     # (check_id, category, name, function, repair_id)
     ("network_interfaces",   "局域网接口", "网卡接口检测",      _chk_network_interfaces,  ""),
@@ -1122,8 +1176,8 @@ LAN_CHECKS = [
     ("udp_broadcast",        "局域网发现", "UDP 广播能力",      _chk_udp_broadcast,       ""),
     ("device_discovery",     "局域网发现", "设备发现检测",      _chk_device_discovery,    ""),
     ("room_scan",            "房间协议",   "局域网房间扫描",    _chk_room_scan,           ""),
-    ("pyaudio_import",       "语音模块",   "PyAudio 可用性",    _chk_pyaudio,             "install_pyaudio"),
-    ("voice_protocol",       "语音模块",   "语音协议模块",      _chk_voice_protocol,      "install_pyaudio"),
+    ("audio_backend",        "语音模块",   "音频后端可用性",    _chk_audio_backend,       "install_audio"),
+    ("voice_protocol",       "语音模块",   "语音协议模块",      _chk_voice_protocol,      "install_audio"),
 ]
 
 # Basic detection: configuration, compression modules
@@ -1328,7 +1382,7 @@ class DiagnosticPage(QWidget):
         self._worker: DiagnosticWorker | None = None
         self._repair_worker: RepairWorker | None = None
         self._running = False
-        self._last_mode: str = ""       # "lan", "basic", "vpn", or "global"
+        self._last_mode: str = ""       # "lan", "basic", or "global"
         self._global_chain: list[str] = []  # remaining modes for global check
         self._was_global: bool = False  # True if last detection was a global check
         self._cards: dict[str, _CategoryCard] = {}

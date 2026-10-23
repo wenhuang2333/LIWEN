@@ -141,9 +141,17 @@ def _recv_header(sock, deadline=None):
         sock.settimeout(prev_timeout)
 
     try:
-        return json.loads(data.decode(HEADER_ENCODING))
+        payload = json.loads(data.decode(HEADER_ENCODING))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ValueError(f"协议错误: 包头不是合法 JSON — {e}") from e
+    # 包头在整套协议里**永远是 JSON 对象**。对端可以发 `[1]`、`5`、`"x"`
+    # （都是合法 JSON），调用方却一律按 dict 用 —— 非对象必须在这里拦掉，
+    # 否则 `.get()` 抛的是 AttributeError，多数调用点只捕获 ValueError/OSError，
+    # 异常会一路逃到线程顶层，让监听线程静默死掉（局域网内 5 字节即可触发）。
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"协议错误: 包头不是 JSON 对象（{type(payload).__name__}）")
+    return payload
 
 
 def _extract_transfer_fields(metadata):
@@ -387,7 +395,7 @@ def send_files(file_paths, host, port, compress_first=True,
                 response = _recv_header(sock)
                 if response is None:
                     raise ConnectionError("对方未响应请求")
-                resp_type = response.get("type", "") if isinstance(response, dict) else ""
+                resp_type = response.get("type", "")
                 if resp_type == MSG_TRANSFER_REJECT:
                     raise PermissionError("对方拒绝了传输请求")
                 elif resp_type != MSG_TRANSFER_ACCEPT:
@@ -495,6 +503,7 @@ def _handle_client(conn, addr, save_dir, progress_callback, speed_callback,
             if metadata is None:
                 break  # 对端正常关闭
             if not isinstance(metadata, dict):
+                # _recv_header 已保证是 dict；这里留一道防线，防止将来放松
                 raise ValueError(f"协议错误: 包头不是 JSON 对象 ({type(metadata).__name__})")
             msg_type = metadata.get("type", "")
 
@@ -618,6 +627,9 @@ def ping_host(host, port, timeout=3):
         return False, f"连接超时 ({timeout}s)"
     except ConnectionRefusedError:
         return False, "目标端口拒绝连接"
+    except ValueError as e:
+        # 对方端口上跑的不是本程序（或包头被破坏）：如实报告，不要抛栈
+        return False, str(e)
     except OSError as e:
         return False, f"网络错误: {e}"
     finally:

@@ -245,6 +245,41 @@ class RoomScanWorker(QThread):
             self.finished.emit({})
 
 
+class RoomProbeWorker(QThread):
+    """按 IP:端口 直连探测房间（UDP 广播不可达时的加入入口）。
+
+    探测只读不写：拿到 room_id / 是否需要密码 / 当前人数，之后仍走
+    ``RoomJoinWorker`` 的挑战-应答流程，密码校验完全不变。
+    """
+
+    finished = pyqtSignal(bool, str, dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, host_ip: str, port: int, timeout: float = 5.0):
+        super().__init__()
+        self._host_ip = host_ip
+        self._port = port
+        self._timeout = timeout
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        try:
+            from network.room_protocol import RoomJoinClient
+            # 把取消标志透给协议层：连接阶段是分片 select 等待，能真正被
+            # cancel() 打断（否则探测黑洞地址要卡满 5s，界面上的离开按钮
+            # 只能干等）
+            ok, msg, info = RoomJoinClient.probe_room(
+                self._host_ip, self._port, timeout=self._timeout,
+                should_cancel=lambda: self._cancel)
+            self.finished.emit(ok, msg, info)
+        except Exception as e:
+            self.error.emit(str(e))
+            self.finished.emit(False, str(e), {})
+
+
 class RoomJoinWorker(QThread):
     finished = pyqtSignal(bool, str, dict)
     error = pyqtSignal(str)
@@ -360,19 +395,22 @@ class VoiceWorker(QThread):
     def run(self):
         ok = False
         try:
-            from network.voice_protocol import VoiceClient
+            from network.voice_protocol import VoiceClient, INSTALL_HINT
             self._client = VoiceClient(self._sender_id, self._voice_port)
             with self._peers_lock:
                 peers = list(self._peers)
             if peers:
                 self._client.set_peers(peers)
             if self._client.start():
-                self.status.emit("语音已连接")
+                backend = self._client.backend_name or "音频后端"
+                self.status.emit(f"语音已连接（{backend}）")
                 ok = True
                 while not self._cancel:
                     self.msleep(200)
             else:
-                self.error.emit("无法初始化音频设备 — 请检查麦克风是否可用")
+                self.error.emit(
+                    "无法初始化音频设备 — 请检查麦克风/扬声器是否可用，"
+                    f"或安装音频后端: {INSTALL_HINT}")
         except Exception as e:
             self.error.emit(str(e))
         finally:

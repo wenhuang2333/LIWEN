@@ -406,10 +406,18 @@ def _get_broadcast_addrs() -> list[str]:
 
 
 def _parse_msg(data: bytes) -> dict | None:
+    """解析 UDP 报文，**只返回 dict 或 None**。
+
+    对端可以发任意合法 JSON（``[1]``、``5``、``"x"`` 都不是对象），而调用方
+    一律按 dict 用（``msg.get(...)``）。若原样返回，``.get()`` 的 AttributeError
+    会逃出监听循环 —— 局域网内任意主机发一个 5 字节包就能让设备发现监听线程
+    静默死掉（``_running`` 还是 True，只是再也不会发现任何设备）。
+    """
     try:
-        return json.loads(data.decode("utf-8"))
+        msg = json.loads(data.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+    return msg if isinstance(msg, dict) else None
 
 
 # ── convenience: get or create the singleton ──────────────

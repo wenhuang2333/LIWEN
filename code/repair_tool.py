@@ -21,7 +21,7 @@ from utils.repair_shared import (
 from utils.repair_helpers import find_main_exe
 from ui.diagnostic_page import (
     CheckResult, LAN_CHECKS, BASIC_CHECKS, REPAIR_REGISTRY,
-    _repair_free_port, _repair_install_pyaudio, _repair_repair_config,
+    _repair_free_port, _repair_install_audio, _repair_repair_config,
 )
 
 STYLE = """

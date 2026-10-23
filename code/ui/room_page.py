@@ -1,7 +1,8 @@
-"""局域网房间页面 — 房间内视图（无 VPN）
+"""局域网房间页面 — 房间内视图（纯应用层组网）
 
 显示房间信息、在线成员、语音通话、房间内文件传输和连接状态。
-所有通信基于真实局域网 IP，不创建虚拟网卡。
+所有通信基于真实局域网 IP，不创建虚拟网卡、不需要管理员权限，
+因此 Windows / macOS / Linux 使用同一套代码即可互相联机。
 
 房间内文件传输直接复用「局域网传输」那套已经加固过的 TCP 协议
 （``network/transfer.py``：压缩、请求/接受、原子落盘、路径穿越防护），
@@ -26,9 +27,14 @@ from ui.styles import MONO_FONT_FAMILY
 from core.workers import VoiceWorker, SendWorker, ReceiveWorker
 
 _VOICE_AVAILABLE = False
+_VOICE_BACKEND = ""
+_VOICE_HINT = "pip install sounddevice"
 try:
-    from network.voice_protocol import is_voice_available
+    from network.voice_protocol import (
+        is_voice_available, voice_backend_name, INSTALL_HINT)
     _VOICE_AVAILABLE = is_voice_available()
+    _VOICE_BACKEND = voice_backend_name()
+    _VOICE_HINT = INSTALL_HINT
 except Exception:
     pass
 
@@ -37,7 +43,7 @@ ALL_TARGETS = "__all__"
 
 
 class RoomPage(QWidget):
-    """In-room page — no VPN, no virtual adapter.
+    """In-room page — application-layer networking only.
 
     Shows room info, online members, voice controls, file transfer, and status.
     """
@@ -159,12 +165,15 @@ class RoomPage(QWidget):
         self._voice_btn.setCheckable(True)
         self._voice_btn.clicked.connect(self._toggle_voice)
         if not _VOICE_AVAILABLE:
-            self._voice_btn.setToolTip("需要安装 PyAudio: pip install pyaudio")
+            self._voice_btn.setToolTip(f"需要音频后端: {_VOICE_HINT}")
             self._voice_btn.setEnabled(False)
             self._voice_btn.setStyleSheet(
                 "QPushButton { background-color: #45475a; color: #9498a4;"
                 "  font-size: 13px; padding: 9px 18px;"
                 "  border: none; border-radius: 6px; }")
+        else:
+            self._voice_btn.setToolTip(
+                f"使用音频后端: {_VOICE_BACKEND or '自动'}")
         ctrl.addWidget(self._voice_btn)
 
         self._leave_btn = QPushButton("离开房间")
@@ -198,7 +207,8 @@ class RoomPage(QWidget):
         self._info_label.setText(
             f"{'本机为主机' if is_host else f'主机: {host_ip}:{port}'}\n"
             f"会话: {session_id[:12] + '…' if session_id else '（房主）'}\n"
-            f"模式: 局域网直连  |  文件端口: {self._data_port}")
+            f"模式: 应用层直连（真实 IP，无需虚拟网卡/管理员）  |  "
+            f"文件端口: {self._data_port}")
         self._log(f"[房间] 已进入房间: {room_name}")
         self._log(f"[房间] 文件传输端口: {self._data_port}")
 
@@ -332,7 +342,7 @@ class RoomPage(QWidget):
     def _start_voice(self):
         if not _VOICE_AVAILABLE:
             QMessageBox.warning(self, "提示",
-                "语音通话需要 PyAudio 库。\n请运行: pip install pyaudio")
+                "语音通话需要音频后端库。\n请运行: " + _VOICE_HINT)
             self._voice_btn.setChecked(False)
             return
         if not self._room_context:

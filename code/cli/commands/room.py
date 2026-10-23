@@ -25,10 +25,16 @@ def register(subparsers):
     p.add_argument("--max-players", type=int, default=8, help="最大玩家数 (默认: 8)")
     p.set_defaults(func=_handle_room_create)
 
+    p = subparsers.add_parser("room-probe", help="按 IP:端口 探测房间（无需 UDP 广播）")
+    p.add_argument("-H", "--host", required=True, help="房间主机 IP")
+    p.add_argument("-p", "--port", type=int, default=12345, help="房间端口 (默认: 12345)")
+    p.set_defaults(func=_handle_room_probe)
+
     p = subparsers.add_parser("room-join", help="加入联机房间")
     p.add_argument("-H", "--host", required=True, help="房间主机 IP")
     p.add_argument("-p", "--port", type=int, default=12345, help="房间端口 (默认: 12345)")
-    p.add_argument("--room-id", required=True, help="房间 ID")
+    p.add_argument("--room-id", default="",
+                   help="房间 ID (留空则先探测主机，自动获取)")
     p.add_argument("--password", default="", help="房间密码")
     p.set_defaults(func=_handle_room_join)
 
@@ -58,7 +64,12 @@ def _handle_room_scan(args):
 def _handle_room_create(args):
     import uuid
     from network.room_protocol import RoomHost
-    from network.room_protocol import _hash_password
+    from network.room_protocol import _hash_password, _get_local_ip
+
+    if not 1024 <= args.port <= 65534:
+        print(f"✗ 房间端口无效: {args.port}（需 1024-65534，加入服务使用 端口+1）",
+              file=sys.stderr)
+        return 1
 
     signal.signal(signal.SIGINT, _on_sigint)
 
@@ -79,6 +90,11 @@ def _handle_room_create(args):
     print(f"  ID: {room_info['room_id']}")
     print(f"  端口: {args.port}")
     print(f"  密码: {'有' if args.password else '无'}")
+    local_ip = _get_local_ip()
+    print(f"  本机 IP: {local_ip}")
+    print(f"\n其他成员加入方式:")
+    print(f"  局域网广播: python code/main.py room-scan")
+    print(f"  直连(跨网段): python code/main.py room-join -H {local_ip} -p {args.port}")
     print(f"\n按 Ctrl+C 停止广播...")
 
     try:
@@ -92,12 +108,43 @@ def _handle_room_create(args):
     return 0
 
 
+def _handle_room_probe(args):
+    from network.room_protocol import RoomJoinClient
+
+    print(f"正在探测 {args.host}:{args.port} ...", file=sys.stderr)
+    ok, msg, info = RoomJoinClient.probe_room(args.host, args.port)
+    if not ok:
+        print(f"✗ 探测失败: {msg}", file=sys.stderr)
+        return 1
+    print(f"✓ 发现房间:")
+    print(f"  名称: {info.get('room_name', '?')}")
+    print(f"  ID: {info.get('room_id', '?')}")
+    print(f"  主机: {info.get('host_name', '?')} ({info.get('host_ip', '?')}:{info.get('port', '?')})")
+    print(f"  密码: {'有' if info.get('has_password') else '无'}")
+    print(f"  玩家: {info.get('player_count', 0)}/{info.get('max_players', 8)}")
+    return 0
+
+
 def _handle_room_join(args):
     from network.room_protocol import RoomJoinClient
 
-    print(f"正在加入房间 {args.room_id} 于 {args.host}:{args.port}...", file=sys.stderr)
+    room_id = args.room_id
+    if not room_id:
+        # 未给 room_id 时先探测：这正是"应用层直连"的用法——
+        # 不依赖 UDP 广播，只要主机 IP:端口可达即可加入。
+        print(f"未指定房间 ID，正在探测 {args.host}:{args.port} ...", file=sys.stderr)
+        ok, msg, info = RoomJoinClient.probe_room(args.host, args.port)
+        if not ok:
+            print(f"✗ 探测失败: {msg}", file=sys.stderr)
+            return 1
+        room_id = info.get("room_id", "")
+        if info.get("has_password") and not args.password:
+            print("✗ 该房间需要密码，请用 --password 指定", file=sys.stderr)
+            return 1
+
+    print(f"正在加入房间 {room_id} 于 {args.host}:{args.port}...", file=sys.stderr)
     ok, msg, config = RoomJoinClient.join_room(
-        args.host, args.port, args.room_id, args.password)
+        args.host, args.port, room_id, args.password)
 
     if ok:
         print(f"✓ 加入成功!")
