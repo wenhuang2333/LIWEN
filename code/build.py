@@ -34,6 +34,7 @@ from utils.constants import (  # noqa: E402
     APP_NAME_SLUG as APP_NAME,
     APP_NAME_ZH,
     APP_VENDOR_SLUG,
+    APP_VERSION,
     APP_REPAIR_SLUG as REPAIR_NAME,
     APP_SETUP_SLUG as SETUP_NAME,
     LEGACY_APP_SLUG,
@@ -494,7 +495,10 @@ def build_dmg():
             f.write(f'    <key>CFBundleDisplayName</key>\n    <string>{APP_NAME_ZH}</string>\n')
             bundle_id = f"com.{APP_VENDOR_SLUG.lower()}.{APP_NAME.lower()}"
             f.write(f'    <key>CFBundleIdentifier</key>\n    <string>{bundle_id}</string>\n')
-            f.write(f'    <key>CFBundleVersion</key>\n    <string>1.0</string>\n')
+            # 版本号同样单一来源：Finder「显示简介」与「关于本机」读的就是这两项。
+            # 以前这里写死 1.0，导致 .app 的版本永远不是 APP_VERSION。
+            f.write(f'    <key>CFBundleShortVersionString</key>\n    <string>{APP_VERSION}</string>\n')
+            f.write(f'    <key>CFBundleVersion</key>\n    <string>{APP_VERSION}</string>\n')
             f.write('    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n')
             f.write('</dict>\n</plist>\n')
 

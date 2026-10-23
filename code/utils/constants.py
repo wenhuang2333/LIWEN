@@ -127,7 +127,7 @@ VOLUME_SUFFIX_PATTERNS = [".7z.001", ".zip.001", ".part01.rar", ".r01"]
 # 可执行文件/构建产物/目录名去掉空格，避免命令行与路径必须加引号。
 APP_NAME_ZH = "帽兜工具"
 APP_NAME_EN = "LIWEN Tool"
-APP_VERSION = "4.19.0"
+APP_VERSION = "6.0.0"
 APP_VENDOR_SLUG = "ShiShangYue"      # ASCII 厂商标识，用于 AppUserModelID / Bundle ID
 APP_AUTHOR = "十山月"
 APP_EMAIL = "1275679733@qq.com"
